@@ -1,0 +1,42 @@
+Patch for dbus-monitor to print the signature of empty arrays,
+which needs to be known in order to reproduce a message.
+--- dbus-1.4.6/tools/dbus-print-message.c.orig	2011-03-24 09:33:38.000000000 +0200
++++ dbus-1.4.6/tools/dbus-print-message.c	2011-03-28 18:12:41.000000000 +0300
+@@ -297,18 +297,27 @@
+ 		break;
+ 	      }
+ 
+-	    printf("array [\n");
+-	    while (current_type != DBUS_TYPE_INVALID)
++	    printf("array [");
++	    if (current_type != DBUS_TYPE_INVALID)
+ 	      {
+-		print_iter (&subiter, literal, depth+1);
+-
+-		dbus_message_iter_next (&subiter);
+-		current_type = dbus_message_iter_get_arg_type (&subiter);
+-
+-		if (current_type != DBUS_TYPE_INVALID)
+-		  printf (",");
++	        putchar('\n');
++	        do
++	          {
++		    print_iter (&subiter, literal, depth+1);
++
++		    dbus_message_iter_next (&subiter);
++		    current_type = dbus_message_iter_get_arg_type (&subiter);
++
++		    if (current_type != DBUS_TYPE_INVALID)
++		      printf (",");
++	          }
++	        while (current_type != DBUS_TYPE_INVALID);
++	        indent(depth);
++	      }
++	    else
++	      {
++	        printf(" (%s) ", dbus_message_iter_get_signature(iter));
+ 	      }
+-	    indent(depth);
+ 	    printf("]\n");
+ 	    break;
+ 	  }

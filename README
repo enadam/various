@@ -1,0 +1,12 @@
+x11/			utilities for developing for X11
+gimme.pl		tiny HTTP server to share personal stuff
+tick.h			drop-in profiler of user-defined events and actions
+ibusz.pl		help recreating dbus-monitored traffic
+ibusz.patch		make ibusz.pl work even better
+libartem.c		LD_PRELOAD-able embedded syslog
+unbuffer.c		run a program with unbuffered output
+getkey.c		lists or tests which evdev keys are being pressed
+dspsrv.c		TCP/IP server to dump all traffic to /dev/dsp
+tgconscp.c		safe and simple scponlyc replacement
+mafwturbator.pl		funny C identifier generator
+apicsa.pl		mass-upload photos to Google Picasa
