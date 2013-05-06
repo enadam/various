@@ -3715,11 +3715,11 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                         /* RGB */
                         break;
 
-#ifdef HAVE_OMAPFB
+# ifdef HAVE_OMAPFB
                       case OMAPFB_COLOR_YUV422:
                         format = YUV422;
                         break;
-#endif /* HAVE_OMAPFB */
+# endif /* HAVE_OMAPFB */
                       default:
                         die("unknown pixel data format\n");
                       }
@@ -3732,7 +3732,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                     red    = 0xf800;
                     green  = 0x07e0;
                     blue   = 0x001f;
-#endif
+#endif /* ! HAVE_FB */
                   }
 
                 /* Get out the frame as quickly as possible.
@@ -5227,7 +5227,8 @@ int main(int argc, char const *const *argv)
       char const *const *wins;
       Bool limbo, need_wins, seen_n, implicit;
 
-      /* Preprocess the command block to find out where it ends
+      /*
+       * Preprocess the command block to find out where it ends
        * and which windows should they operate on.
        *
        * cmdst := where the commands start for this command block
