@@ -4797,7 +4797,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                     XftDraw *xft;
                     XftFont *font;
                     XftColor color;
-                    unsigned ltext;
+                    size_t ltext;
                     char const *text;
                     XWindowAttributes attrs;
 
@@ -5170,7 +5170,7 @@ int main(int argc, char const *const *argv)
 # define FEATURE(str)      " " str
               "built with" CONFIG_FEATURES "\n"
 #endif
-              , argv[0], strlen(argv[0]), "");
+              , argv[0], (unsigned)strlen(argv[0]), "");
       return 0;
     }
   /* }}} */
