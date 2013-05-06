@@ -71,19 +71,7 @@
     CFLAGS="$CFLAGS -DHAVE_$define";
   done
 
-  if [ "$defines" != "" ];
-  then
-    echo -n "building with";
-    CFLAGS="$CFLAGS -DCONFIG_FEATURES=";
-    for define in $defines;
-    do
-      echo -n " $define";
-      CFLAGS="${CFLAGS}FEATURE(\"$define\")";
-    done
-    echo;
-  fi
-
-  if [ "$1" = "-v" ];
+  if [ "x$1" = "x-v" ];
   then
     echo="echo";
     shift;
@@ -91,20 +79,38 @@
     echo="";
   fi
 
-  : We need sqrt to calculate Eucledian distances.
-  CFLAGS="$CFLAGS `pkg-config --cflags --libs $pkgs` -lm";
-  echo "This program is free software.  It does whatever it wants.";
-  [ "$echo" -o -f "$0" ] \
-    && exec $echo $CC -Wall $CFLAGS $lang "$0" "$@";
+  if [ "$defines" != "" ];
+  then
+    echo -n "building with";
+    CFLAGS="$CFLAGS -DCONFIG_FEATURES=";
+    [ "$echo" ] && CFLAGS="${CFLAGS}'";
+    for define in $defines;
+    do
+      echo -n " $define";
+      CFLAGS="${CFLAGS}FEATURE(\"$define\")";
+    done
+    CFLAGS="${CFLAGS}";
+    [ "$echo" ] && CFLAGS="${CFLAGS}'";
+    echo;
+  fi
 
-  : The source code is coming from the standard input.
-  : Get it from the heredoc and compile that.
+  : We need sqrt to calculate Eucledian distances.
+  CFLAGS="$CFLAGS `pkg-config --cflags $pkgs`";
+  LIBS="$CFLAGS `pkg-config --libs $pkgs` -lm";
+  echo "This program is free software.  It does whatever it wants.";
+
+  : Build or simply echo the compilation command line.
+  [ "$echo" -o -f "$0" ] \
+    && exec $echo $CC -Wall $CFLAGS $lang "$0" $LIBS "$@";
+
+  : Otherwise the source code is coming from the standard input,
+  : for example from wget.  Get it from the heredoc and compile that.
   {
    : Eat the #endif.  We have to run the rest through cat,
    : because it is possible that the shell wrote the heredoc
-   : to a temporary file, and if cpp seems to rewind files.
+   : to a temporary file, and cpp seems to rewind files.
    while read line rest && [ "$line" != "#endif" ]; do :; done
-   cat | $CC -Wall $CFLAGS -include /dev/stdin $lang /dev/null "$@"; exit;
+   cat | $CC -Wall $CFLAGS -include /dev/stdin $lang /dev/null $LIBS "$@"; exit;
   } << 'END_OF_PROGRAM';
 #endif /* i_am_a_shell_program }}} */
 /*
@@ -116,12 +122,12 @@
  * Dedicated to Kimmo Ha:ma:la:inen for his expertise and patience.
  *
  * You can compile it either by:
- * $ [with_<package>="no"]... sh map.c [<compiler-flags>] [-v] -o map
+ * $ [with_<package>="no"]... sh map.c [-v] [<compiler-flags>] -o map
  *   # Autodetects what you have, but you can selectively disable <package>s.
  *   # This is useful if the running environment will be more constrained
  *   # than the compilation environment.  With the -v flag you can see
  *   # the compiler command line without executing it.
- * $ cc -Wall [<compiler-flags>] -lX11 -lm map.c -o map
+ * $ cc -Wall [<compiler-flags>] map.c -lX11 -lm -o map
  *   # To build a bare-bones version.
  *
  * Usage: ./map {[-W do] <command>... [<window>...] [-W <repeat>]}...
