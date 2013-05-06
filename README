@@ -10,3 +10,4 @@ dspsrv.c		TCP/IP server to dump all traffic to /dev/dsp
 tgconscp.c		safe and simple scponlyc replacement
 mafwturbator.pl		funny C identifier generator
 apicsa.pl		mass-upload photos to Google Picasa
+apt-dl.pl		download and optionally extrace Debian packages
