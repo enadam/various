@@ -1264,7 +1264,7 @@ static char const *get_point(char const *p, short *xp, short *yp,
   char const *pp, *origin;
 
   if (!(pp = get_dims_or_coords(p, xp, yp, False, True, xpos)))
-    { /* No coordinates, maybe we have a [tl][br]. */
+    { /* No coordinates, maybe we have a [tcb][lcr]. */
       origin = p;
       *xp = *yp = 0;
     }
@@ -1273,8 +1273,12 @@ static char const *get_point(char const *p, short *xp, short *yp,
 
   if (!((origin[0] == 't' || origin[0] == 'c' || origin[0] == 'b')
         && (origin[1] == 'l' || origin[1] == 'c' || origin[1] == 'r')))
-    /* No origin, $p was all to parse. */
-    return pp;
+    {
+      /* No origin, $p was all to parse. */
+      if (originp)
+        *originp = NULL;
+      return pp;
+    }
 
   /* Translate; the origin is tl by default. */
   if (originp)
