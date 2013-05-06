@@ -3475,13 +3475,11 @@ static void pointer_event(Window win,
     }
   else
     { /* Send a synthetic pointer event. */
-      int mask;
       XEvent ev;
 
       memset(&ev, 0, sizeof(ev));
       if (what == MotionNotify)
         {
-          mask = PointerMotionMask;
           assert(XTranslateCoordinates(Dpy, Root, win,
                                        where->x, where->y,
                                        &ev.xmotion.x, &ev.xmotion.y,
@@ -3495,7 +3493,6 @@ static void pointer_event(Window win,
         }
       else
         {
-          mask = what == ButtonPress ? ButtonPressMask : ButtonReleaseMask;
           assert(XTranslateCoordinates(Dpy, Root, win,
                                        where->x, where->y,
                                        &ev.xbutton.x, &ev.xbutton.y,
