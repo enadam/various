@@ -120,7 +120,7 @@ sub ar
 
 # Main starts here
 my ($opt_url_only, $opt_extract, @opt_extract_paths, $opt_outdir);
-my (@repos, $package);
+my (@repos, $package, $version, $path);
 
 # Parse the command line.
 while (@ARGV)
@@ -217,24 +217,27 @@ open(APT_CACHE, '-|', qw(apt-cache show --no-all-versions), @ARGV)
 	or die "apt-cache: $!";
 PACKAGE: while (<APT_CACHE>)
 {
-	my $path;
-
-	# Save the package name under processing.
 	if (s/^Package:\s*//)
-	{
+	{	# Save the package name under processing.
 		chomp;
 		$package = $_;
 		next;
+	} elsif (s/^Version:\s*//)
+	{	# Find out $package's location in the repository.
+		chomp;
+		$version = $_;
+		next;
+	} elsif (s/^Filename:\s*//)
+	{	# Find out $package's location in the repository.
+		chomp;
+		$path = $_;
+		next;
 	} elsif ($_ eq "\n")
-	{	# End of Package: record.
-		undef $package;
+	{	# End of Package: record.  We can start working now.
+	} else
+	{
 		next;
 	}
-
-	# Find out $package's location in the repository.
-	s/^Filename:\s*// or next;
-	chomp;
-	$path = $_;
 
 	# Action
 	REPO: foreach (@repos)
@@ -296,7 +299,9 @@ PACKAGE: while (<APT_CACHE>)
 			}
 
 			# Now we can be sure about the $package's location.
-			print STDERR "Getting $package from $repo...";
+			print STDERR defined $version
+				? "Getting $package ($version) from $repo..."
+				: "Getting $package from $repo...";
 			open(TAR, '|-', qw(tar xz), @opt_extract_paths)
 				or die "tar: $!";
 			ar(*WGET, *TAR, 'data.tar.gz');
@@ -306,6 +311,7 @@ PACKAGE: while (<APT_CACHE>)
 
 		# Remove $package from the list of packages to process.
 		@ARGV = grep($_ ne $package, @ARGV);
+		$package = $version = $path = undef;
 		next PACKAGE;
 	}
 
