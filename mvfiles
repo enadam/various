@@ -1,0 +1,290 @@
+#!/usr/bin/perl -w
+#
+# mvfiles/rmfiles -- edit the contents of a directory in vim(1)
+#
+# With mvfiles you can edit freely the file names in a directory.
+# It brings up a two-window vim, one showing the original file names.
+# In the other window you can freely rename and swap file names.
+# When you're done you just need to save the modfied file list and
+# quit the editor.  If you empty a line, the corresponding file
+# will be offered for deletion.
+#
+# rmfiles differs from mvfiles in that it only allows deletion of files.
+# To delete a file you can either empty its line or simply delete the line.
+#
+# Synopsis:
+#   mvfiles [<files-to-rename>]
+#   rmfiles [<files-to-possibly-delete>]
+#
+# If the file list is missing all files (except dotfiles) in the current
+# directory are considered.  However, if they are specified, they need
+# not be in the current directory.
+
+use strict;
+
+# Wrapper around unlink() to warn if there's an error.
+sub rm
+{
+	unlink($_) or warn "$_: $!" foreach @_;
+}
+
+# Safe wrapper around rename().
+sub mv
+{
+	my ($from, $to) = @_;
+
+	die "$to: file exists" if -e $to;
+	return 1 if rename($from, $to);
+	print STDERR "rename($from => $to): $!";
+	return 0;
+}
+
+# Returns a random file name beginning with $base and ending in a random
+# number.
+sub mktmpfname
+{
+	my $base = shift;
+	my $tmp;
+
+	do
+	{
+		$tmp = $base . '.' . rand();
+	} while (-e $tmp);
+
+	return $tmp;
+}
+
+# Delete or rename files recursively.  It can handle rename chains like
+# "a" -> "b", "b" -> "c", "c -> x" and break cycles like "a" -> "b",
+# "b -> "c", "c" -> "a" by renaming "c" to a temporary file.  $files
+# is a mapping of all files to be renamed.  $from and $to are the file
+# names to rename to/fro.  $first gain significance in rename chains,
+# when do_away() is invoked recusively, and it contains the first file
+# to be removed.
+sub do_away
+{
+	my ($files, $from, $to, $first) = @_;
+	my ($toto, $ok);
+
+	if (!defined $to)
+	{	# $from doesn't have a destination, simply delete it.
+		$ok = rm($from);
+	} elsif (defined $first && $to eq $first)
+	{	# We've reached the end of a remove cycle.  Rename it
+		# to a temporary file, then a subsequent call by the
+		# topmost invokator will make sure that it is renamed
+		# to $to.
+		my $tmp = mktmpfname($to);
+		($ok = mv($from, $tmp))
+			and $$files{$tmp} = $to;
+	} elsif (!defined ($toto = delete $$files{$to})
+		|| do_away($files, $to, $toto,
+			defined $first ? $first : $from))
+	{	# Simple rename or chained rename where the recursive call
+		# to do_away() has done its job.
+		$ok = mv($from, $to);
+	}
+
+	# Propagate errors.
+	return $ok;
+}
+
+# Main starts here
+my ($whoami, $origlist, $newlist);
+my ($files, %files, @delete, $fname);
+
+# Are we mvfiles or rmfiles?
+$whoami = $0;
+$whoami =~ s!^.*/+!!;
+
+# Get the files to process and verify that there're not duplicates
+# amongst them.
+$\ = "\n";
+$files = @ARGV ? \@ARGV : [ <*> ];
+foreach $fname (@$files)
+{
+	die "$fname: duplicate source file name"
+		if exists $files{$fname};
+	$files{$fname} = 1;
+}
+undef %files unless $whoami eq "rmfiles";
+
+# Create the file lists.
+$origlist = mktmpfname("mvfiles_from");
+$newlist  = mktmpfname("mvfiles_to");
+open(ORIGLIST, '>', $origlist)
+	or die "$origlist: $!";
+if (!open(NEWLIST, '>', $newlist))
+{
+	rm($origlist);
+	die "$newlist: $!";
+}
+
+$SIG{'INT'} = sub { rm($origlist, $newlist); exit 1; };
+
+foreach $fname (@$files)
+{
+	print ORIGLIST $fname;
+	print NEWLIST  $fname;
+}
+chmod(0444, *ORIGLIST);
+close(ORIGLIST);
+close(NEWLIST);
+
+# EDIT until we detect no consistency error in the renaming.
+EDIT: while (1)
+{
+	my (%newnames, %rmfiles);
+
+	# Invoke vim on the file lists.
+	if (system('vim', '-O', '--', $newlist, $origlist))
+	{
+		rm($origlist, $newlist);
+		exit 1;
+	}
+
+	# Process $newlist.
+	if (!open(NEWLIST, '<', $newlist))
+	{
+		warn "$newlist: $!";
+		rm($origlist, $newlist);
+		exit 1;
+	}
+
+	# For mvfiles:
+	# %files is a mapping from the original file names to the desired
+	# ones.  Undefined values designate file deletions.  We also collect
+	# files to be @delete:d, so later on it will be easier to pop up a
+	# prompt whether the user really want to delete those files.
+	# We also maintain a %newnames set to ensure that the user doesn't
+	# try to rename more than one files to the same name.
+	#
+	# For rmfiles:
+	# %rmfiles is a set of files to be deleted (%files is just the
+	# original set).  We progressively delete from this hash as we
+	# read file names to be kept from NEWLIST.
+	if ($whoami ne "rmfiles")
+	{
+		%files = @delete = ();
+	} else
+	{
+		%rmfiles = %files;
+	}
+	foreach $fname (@$files)
+	{
+		my $newfname = <NEWLIST>;
+
+		if ($whoami eq "rmfiles")
+		{	# %files contain the files to be deleted.
+			if (!defined $newfname)
+			{
+				@delete = keys(%files);
+				last;
+			}
+
+			chomp($newfname);
+			if ($newfname eq '')
+			{
+				if (!exists $files{$fname})
+				{
+					print STDERR "$newfname: ",
+						"trying to delete ",
+						"a previously kept file.";
+					next EDIT;
+				}
+			} else
+			{
+				if (!delete $files{$newfname})
+				{
+					print STDERR "$newfname: ",
+						"trying to keep ",
+						"a non-existent ",
+						"or already kept file.";
+					next EDIT;
+				}
+			}
+
+			next;
+		}
+
+		# We're mvfiles.
+		if (!defined $newfname)
+		{	# There are fewer lines in NEWLIST then in $files.
+			print STDERR "Too few destination file names.";
+			next EDIT;
+		}
+		chomp($newfname);
+
+		if ($newfname eq '')
+		{	# Empty line, this file is to be deleted.
+			push(@delete, $fname);
+			$files{$fname} = undef;
+			next;
+		} elsif (exists $newnames{$newfname})
+		{	# There's already a file with that $newfname.
+			print STDERR $newfname, 
+				": duplicate destination file name.";
+			next EDIT;
+		}
+
+		# $fname will be deleted or renamed to $newfname.
+		# Only care about it if the file name is really
+		# to be changed.
+		$newnames{$newfname} = undef;
+		$files{$fname} = $newfname
+			if $fname ne $newfname;
+	}
+
+	# End of $files.  We can remove the file lists now.
+	if (defined ($_ = <NEWLIST>))
+	{
+		print STDERR "Too many destination file names.";
+		next EDIT;
+	} else
+	{	# Everything is fine.
+		close(NEWLIST);
+		rm($origlist, $newlist);
+		last;
+	}
+} continue
+{	# Re-edit NEWLIST.
+	close(NEWLIST);
+	print STDERR "Press ENTER to retry or ^C to quit.";
+	readline(*STDIN);
+}
+
+# Confirm that files can really be @delete:d.
+if (@delete)
+{
+	print "Say D to delete the following files: ", join(", ", @delete);
+
+	if (<STDIN> ne "D\n")
+	{
+		print "Not confirmed.";
+		exit 1;
+	}
+}
+
+if ($whoami eq "rmfiles")
+{
+	exit rm(@delete) != @delete;
+}
+
+# Got anything to rename or delete?
+if (!%files)
+{
+	print "No changes.";
+	exit;
+}
+
+# Proceed to rename/delete files.  do_away() may change %files, so consume
+# it by picking the first element of the hash.  It doesn't matter which one
+# it is, since do_away() can handle rename chains.
+while (%files)
+{
+	my ($from, undef) = each(%files);
+	do_away(\%files, $from, delete $files{$from});
+	keys(%files);
+}
+
+# End of mvfiles

@@ -12,3 +12,6 @@ mafwturbator.pl		funny C identifier generator
 apicsa.pl		mass-upload photos to Google Picasa
 apt-dl.pl		download and optionally extract Debian packages
 masstag			tag MP3 files with title, track number or anything
+mvfiles			edit file names in vim
+rmfiles			edit the contents of a directory in vim
+
