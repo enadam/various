@@ -81,7 +81,7 @@
 
   if [ "$defines" != "" ];
   then
-    echo -n "building with";
+    echo -n "Building with";
     CFLAGS="$CFLAGS -DCONFIG_FEATURES=";
     [ "$echo" ] && CFLAGS="${CFLAGS}'";
     for define in $defines;
@@ -91,12 +91,12 @@
     done
     CFLAGS="${CFLAGS}";
     [ "$echo" ] && CFLAGS="${CFLAGS}'";
-    echo;
+    echo .;
   fi
 
   : We need sqrt to calculate Eucledian distances.
   CFLAGS="$CFLAGS `pkg-config --cflags $pkgs`";
-  LIBS="$CFLAGS `pkg-config --libs $pkgs` -lm";
+  LIBS="`pkg-config --libs $pkgs` -lm";
   echo "This program is free software.  It does whatever it wants.";
 
   : Build or simply echo the compilation command line.
