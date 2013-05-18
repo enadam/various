@@ -1,4 +1,5 @@
 x11/			utilities for developing for X11
+fs/			file system utilities
 gimme.pl		tiny HTTP server to share personal stuff
 tick.h			drop-in profiler of user-defined events and actions
 ibusz.pl		help recreating dbus-monitored traffic
@@ -12,6 +13,3 @@ mafwturbator.pl		funny C identifier generator
 apicsa.pl		mass-upload photos to Google Picasa
 apt-dl.pl		download and optionally extract Debian packages
 masstag			tag MP3 files with title, track number or anything
-mvfiles			edit file names in vim
-rmfiles			edit the contents of a directory in vim
-

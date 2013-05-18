@@ -1,0 +1,3 @@
+mvfiles			edit file names in vim
+rmfiles			edit the contents of a directory in vim
+dedup.pl		hardlink files with identical content
