@@ -135,10 +135,24 @@ sub usage
 
 # Main starts here
 # %fnames is a mapping between file names and inode keys (device number
-# + inode number).  @fnames simply enumerates the files to operate on ordered
-# alphabetically.  %cksums is a mapping between MD5 hashes and inode keys.
+# + inode number).  These keys are supposed to identify any file on the
+# system globally uniquely.
+#
+# @fnames simply enumerates the files to operate on.
+#
 # %inodes is a mapping between inode keys and file names having the same
-# content.
+# content.  Its value is a list of list, each inner list consisting of
+# the file names with the same inode number.  So, for example a value of
+# [ [ qw(alpha beta gamma) ], [ qw(one two) ] ] means all of the file have
+# the same content, and alpha, beta and gamma are links (have the same inode
+# number, just like one and two, but the two set of files have different
+# inode numbers.  If these files reside on the same file system, they should
+# be linked together.
+#
+# %cksums is a mapping between MD5 hashes and inode keys.  Its value is
+# a list of inode keys, each of them from a different device.  It's used
+# to store "master" inode keys: files with a given MD5 hash will be compared
+# with the master inode (retrieved from %inodes).
 #
 # The program has three phases: first the files to be consdered are collected.
 # Then the files which could be linked together are figured out.  Finally, the
@@ -165,6 +179,7 @@ usage(1) unless GetOptions(
 			? qr/\Q.$_[1]\E$/ : qr/$_[1]/);
 	});
 
+# Phase I.
 # Collect the file names we'll operate on, and initialize %fnames and %inodes.
 # Scan directories recursively.  If no @ARGS are given, consider the current
 # directory.
@@ -206,9 +221,6 @@ find({
 		$key = "${dev}_${ino}";
 		if (!exists $inodes{$key})
 		{	# We haven't met this inode yet.
-			# %inodes is a list of list, each inner list
-			# consisting of the file names with the same
-			# inode number (ie. already linked together).
 			$inodes{$key} = [ [ $_ ] ];
 			$fnames{$_} = $key
 		} else
@@ -224,6 +236,7 @@ find({
 @fnames = sort(keys(%fnames));
 exit if !@fnames;
 
+# Phase II.
 # Get the MD5 hash of @files and see which files can be linked together.
 # Communicate with md5sum though xargs for maximum performance (ie. we
 # invoke md5sum as few times as possible).
@@ -269,9 +282,7 @@ for (;;)
 	defined $dev or die;
 
 	if (!defined ($keys = $cksums{$cksum}))
-	{	# We haven't seen this hash.
-		# %cksums actually consist of a list of keys,
-		# each of them from a different device.
+	{	# We haven't encountered this hash yet.
 		$cksums{$cksum} = [ $key ];
 		next;
 	}
@@ -319,6 +330,7 @@ die if %fnames;
 # We don't need %cksums any more.
 undef %cksums;
 
+# Phase III.
 # Do the actual linking.
 $\ = "\n";
 foreach my $inode (values(%inodes))
