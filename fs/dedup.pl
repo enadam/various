@@ -45,7 +45,7 @@ use strict;
 use IPC::Open2;
 use File::Find;
 use Getopt::Long;
-use POSIX qw(ENOENT EEXIST);
+use POSIX qw(ENOENT EEXIST EISDIR);
 
 # Private variables
 # $Opt_dry_run conforms to the -n command line option.
@@ -83,7 +83,7 @@ DEST:	foreach (@$dst)
 			{	# $_ doesn't even exist, that's also okay.
 				undef $tmp;
 				last;
-			} elsif ($! != EEXIST)
+			} elsif ($! != EEXIST && $! != EISDIR)
 			{	# Renaming failed for some reason other than
 				# we happened to choose an existing $tmp name.
 				# That's not ok.
