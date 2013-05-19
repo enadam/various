@@ -122,6 +122,17 @@ sub matched
 	return 0;
 }
 
+# Print usage then exit.
+sub usage
+{
+	my $iserr = shift;
+	my $fh = $iserr ? *STDERR : *STDOUT;
+
+	print $fh "usage: $0 [-vn] [-i <include>] [-x <exclude>] ",
+		"[<files-or-directories>...]\n";
+	exit($iserr || 0);
+}
+
 # Main starts here
 # %fnames is a mapping between file names and inode keys (device number
 # + inode number).  @fnames simply enumerates the files to operate on ordered
@@ -137,13 +148,8 @@ my ($opt_verbose, @opt_include, @opt_exclude);
 
 # Parse the command line.
 Getopt::Long::Configure(qw(gnu_compat permute bundling noignore_case));
-die unless GetOptions(
-	'h|help'	=> sub
-	{
-		print "usage: $0 [-vn] [-i <include>] [-x <exclude>] ",
-			"[<files-or-directories>...]\n";
-		exit 0;
-	},
+usage(1) unless GetOptions(
+	'h|help'	=> sub { usage() },
 	'v|verbose'	=> \$opt_verbose,
 	'n|dry-run'	=> \$Opt_dry_run,
 	'i|include=s'	=> sub
