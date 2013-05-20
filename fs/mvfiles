@@ -267,7 +267,7 @@ if (@delete)
 
 if ($whoami eq "rmfiles")
 {
-	exit rm(@delete) != @delete;
+	exit(rm(@delete) != @delete);
 }
 
 # Got anything to rename or delete?
