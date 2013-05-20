@@ -149,15 +149,19 @@ sub usage
 # inode numbers.  If these files reside on the same file system, they should
 # be linked together.
 #
+# %sizes is a mapping between file sizes and file names with that size.
+#
 # %cksums is a mapping between MD5 hashes and inode keys.  Its value is
 # a list of inode keys, each of them from a different device.  It's used
 # to store "master" inode keys: files with a given MD5 hash will be compared
 # with the master inode (retrieved from %inodes).
 #
-# The program has three phases: first the files to be consdered are collected.
-# Then the files which could be linked together are figured out.  Finally, the
-# appropriate files are linked together in the most efficient manner.
-my (%fnames, @fnames, %inodes, %cksums);
+# The program has four phases: first the files to be consdered are collected.
+# Then we eliminate files with unique sizes (thus which cannot be an exact
+# copy of other files).  Following that, the files which could be linked
+# are figured out.  Finally, the appropriate files are linked together in
+# the most efficient manner.
+my (%fnames, @fnames, %inodes, %sizes, %cksums);
 my ($opt_verbose, @opt_include, @opt_exclude);
 
 # Parse the command line.
@@ -191,7 +195,7 @@ find({
 	no_chdir => 1,
 	wanted => sub
 	{
-		my ($dev, $ino, $key);
+		my ($dev, $ino, $size, $key);
 
 		# File name already seen, probably specified twice on the
 		# command line.
@@ -214,7 +218,7 @@ find({
 		}
 
 		# Skip everything other than readable regular files.
-		($dev, $ino) = stat;
+		($dev, $ino, undef, undef, undef, undef, undef, $size) = stat;
 		return if ! -f _ || ! -r _;
 
 		# The $key is the unique identifier of an inode.
@@ -222,6 +226,7 @@ find({
 		if (!exists $inodes{$key})
 		{	# We haven't met this inode yet.
 			$inodes{$key} = [ [ $_ ] ];
+			push(@{$sizes{$size}}, $_);
 			$fnames{$_} = $key
 		} else
 		{	# $_ is a hardlink of an already seen file.
@@ -230,13 +235,22 @@ find({
 	},
 }, @ARGV ? @ARGV : '.');
 
+# Phase II.
+# Eliminate %fnames with unique %sizes, then clear the hash.
+while (my (undef, $fnames) = each(%sizes))
+{
+	delete $inodes{delete $fnames{$$fnames[0]}}
+		if @$fnames == 1;
+}
+undef %sizes;
+
 # Process @fnames in alphabetic rather than some totally alphabetic orders,
 # as files in the same directory are more likely placed together.  If we
 # didn't gather any @files, we've got nothing to do.
 @fnames = sort(keys(%fnames));
 exit if !@fnames;
 
-# Phase II.
+# Phase III.
 # Get the MD5 hash of @files and see which files can be linked together.
 # Communicate with md5sum though xargs for maximum performance (ie. we
 # invoke md5sum as few times as possible).
@@ -330,7 +344,7 @@ die if %fnames;
 # We don't need %cksums any more.
 undef %cksums;
 
-# Phase III.
+# Phase IV.
 # Do the actual linking.
 $\ = "\n";
 foreach my $inode (values(%inodes))
