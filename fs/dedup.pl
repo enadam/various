@@ -219,7 +219,7 @@ find({
 
 		# Skip everything other than readable regular files.
 		($dev, $ino, undef, undef, undef, undef, undef, $size) = stat;
-		return if ! -f _ || ! -r _;
+		return if ! -f _ || -l _ || ! -r _;
 
 		# The $key is the unique identifier of an inode.
 		$key = "${dev}_${ino}";
