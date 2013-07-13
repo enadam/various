@@ -15,7 +15,11 @@
 #			if a tag is truncated due to ID3v1's limitations.
 #   -C			Commit changes.  If not specified, masstag just
 #			prints the commands it would execute.
-#   -a <artist>, -{l|A} <album>, -y <year>, -g {<genre>|<genre-number>,
+#   -T <titles-file>	Read and set the titles of <mp3-files> from
+#			<titles-file>, which should contain one title
+#			per line.  The number of titles should correspond
+#			to the number of <mp3-files>.
+#   -a <artist>, -{l|A} <album>, -y <year>, -g {<genre>|<genre-number>},
 #   -c <comment>	Set the specified tag.  Only specified tags are
 #			modified.
 #   --<TAG> <value>	Set the specified tag (-2 mode only).
@@ -74,7 +78,7 @@ do
 			args[${#args[@]}]="$2";
                 else
 			case "$1" in
-			-a|-c)
+			-[ac])
 				# Check the length of comments.
 				checklen="yes";
 				;;
@@ -167,7 +171,7 @@ then
 fi
 
 # Run
-# We have six mode of operation: $titles or $track given or not,
+# We have six mode of operations: $titles or $track given or not,
 # and which $prog to use.
 if [ "$titles" != "" ];
 then
