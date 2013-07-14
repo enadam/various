@@ -1,0 +1,68 @@
+#!/bin/sh
+#
+# lsmp3 -- display ID3v1 tags of MP3 files using mp3info(1)
+#
+# Synopses:
+#   lsmp3 [<mp3-files>]
+#     Display the title of <mp3-files>.
+#   lsmp3 -a [<mp3-files>]
+#     Display the artist, album, year and genre of <mp3-files>.
+#
+# If no <mp3-files> are specified, the list of files will be searched for
+# in the ./playlist or any *.m3u file, if any exists.  If not, information
+# about *.mp3, *.MP3 and *.Mp3 files will be displayed.
+
+# mp3info(1) can be told the information to display by specifying a
+# printf()-style format argument.  Set one depending on whether to
+# display album-info (-a) or song-info.
+if [ "x$1" = "x-a" ];
+then
+	# <track_no>. <artist>: <album> (<year>, <genre>)
+	fmt='%2n. %a: %l (%y, %g)\n';
+	shift;
+else	# <track_no>. <title>
+	fmt='%2n. %t\n';
+fi
+
+# Which files to display information about?
+# Those located in playlists?
+if [ $# -eq 0 ];
+then
+	for list in 'playlist' '*.m3u' '*.M3U' '*.M3u'
+	do
+		eval set -- $list;
+		if [ $# -gt 0 ];
+		then
+			[ -f "$1" ] && break;
+			shift;
+		fi
+	done
+fi
+
+# *.mp3 files in the current directory?
+if [ $# -eq 0 ];
+then
+	for ext in '*.Mp3' '*.MP3' '*.mp3';
+	do
+		eval set -- $ext "$@";
+		[ $# -gt 0 -a "$1" = "$ext" -a ! -f "$ext" ] \
+			&& shift;
+	done
+fi
+
+# Exit if didn't find any files.
+[ $# -gt 0 ] || exit 0;
+
+# Run mp3info through the list of files with the appripriate $fmt.
+case "$1" in
+playlist|*.m3u|*.M3U|*.M3u)
+	# *.m3u files often have CRLF line termination.  Make sure to
+	# convert them to Unix-style single \n ending.  Also use xargs -0
+	# in order to allow single quotes in the file names like "I'm you".
+	tr -d '\r' < "$1" | tr '\n' '\0' | xargs -0 -- mp3info -p "$fmt";
+	;;
+*)
+	exec mp3info -p "$fmt" "$@";
+esac
+
+# End of lsmp3

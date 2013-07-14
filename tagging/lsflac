@@ -1,0 +1,173 @@
+#!/bin/bash
+#
+# lsflac -- display metadata of FLAC files using metaflac(1)
+#
+# This program is the FLAC equivalent of lsmp3.  The invocation is the same,
+# though the output may be slightly different.  Recognized tag names are as
+# recommended in the Ogg Vorbis I format specification: comment field and
+# header specification (ALBUM, ARTIST, TITLE, TRACKNUMBER, GENRE, YEAR).
+
+# Print $album, $artist, $title, $track, $genre, $date, depending on
+# $albuminfo.
+display()
+{
+	if [ "$track" != "" ];
+	then
+		[ $track -ge 10 ] \
+			|| echo -n " ";
+		echo -n "$track.";
+	fi
+
+	if [ "$albuminfo" = "yes" ];
+	then
+		[ "$track" = "" -o \( "$artist" = "" -a "$album" = "" \) ] \
+			|| echo -n " ";
+		if [ "$artist" != "" -a "$album" != "" ];
+		then
+			echo -n "$artist: $album";
+		elif [ "$artist" != "" ];
+		then
+			echo -n "$artist";
+		elif [ "$album" != "" ];
+		then
+			echo -n "$album";
+		fi
+
+		[ "$track" = "" -a "$artist" = "" -a "$album" = "" \
+				-o \( "$date" = "" -a "$genre" = "" \) ] \
+			|| echo -n " ";
+		if [ "$date" != "" -a "$genre" != "" ];
+		then
+			echo "($date, $genre)";
+		elif [ "$date" != "" ];
+		then
+			echo "($date)";
+		elif [ "$genre" != "" ];
+		then
+			echo "($genre)";
+		else
+			echo;
+		fi
+	elif [ "$title" != "" ];
+	then
+		[ "$track" = "" ] \
+			|| echo -n " ";
+		echo "$title";
+	fi
+}
+
+# Main starts here.
+# Parse the command line.
+if [ "x$1" = "x-a" ];
+then
+	albuminfo="yes";
+	shift;
+else
+	albuminfo="no";
+fi
+
+# Get the files to gather information about.
+if [ $# -eq 0 ];
+then
+	if [ -f playlist ];
+	then
+		set -- playlist;
+	else
+		for ext in '*.Flac' '*.FLAC' '*.flac';
+		do
+			eval set -- $ext "$@";
+			[ $# -gt 0 -a "$1" = "$ext" -a ! -f "$ext" ] \
+				&& shift;
+		done
+	fi
+fi
+
+# Exit if nothing to do.
+[ $# -gt 0 ] || exit 0;
+
+# Run metaflac through the FLAC files and process its output.
+case "$1" in
+playlist)
+	tr -d '\r' < "$1" | tr '\n' '\0' |  xargs -0 -- \
+		metaflac --list --with-filename;
+	;;
+*)
+	exec metaflac --list --with-filename "$@";
+esac \
+| (
+	fname="";
+	while read line;
+	do
+		tmp="${line%:METADATA block #0}";
+		if [ "$tmp" != "$line" ];
+		then	# New file has begun.
+			# Flush $fname.
+			[ "$fname" = "" ] || display;
+			fname="$tmp";
+			artist="";
+			album="";
+			track="";
+			title="";
+			genre="";
+			date="";
+		else	# Metadata for $fname.
+			if [ "$fname" = "" ];
+			then	# By this time we must have encountered
+				# METADATA block #0.
+				"$0: out of order metadata blocks" >&2;
+				continue;
+			fi
+
+			# Parse $line.
+			tag="${line#$fname:    comment\[?\]: }";
+
+			# Parse $tag and set the appropriate variables.
+			val="${tag#ARTIST=}";
+			if [ "$val" != "$tag" ];
+			then
+				artist="$val";
+				continue;
+			fi
+
+			val="${tag#ALBUM=}";
+			if [ "$val" != "$tag" ];
+			then
+				album="$val";
+				continue;
+			fi
+
+			val="${tag#TRACKNUMBER=}";
+			if [ "$val" != "$tag" ];
+			then
+				track="$val";
+				continue;
+			fi
+
+			val="${tag#TITLE=}";
+			if [ "$val" != "$tag" ];
+			then
+				title="$val";
+				continue;
+			fi
+
+			val="${tag#GENRE=}";
+			if [ "$val" != "$tag" ];
+			then
+				genre="$val";
+				continue;
+			fi
+
+			val="${tag#DATE=}";
+			if [ "$val" != "$tag" ];
+			then
+				date="$val";
+				continue;
+			fi
+		fi
+	done
+
+	# Flush latest $fname.
+	[ "$fname" = "" ] || display;
+);
+
+# End of lsflac
