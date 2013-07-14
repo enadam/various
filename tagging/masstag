@@ -1,0 +1,322 @@
+#!/bin/bash
+#
+# masstag -- tag MP3 and FLAC iles in batch
+#
+# Synopsis:
+#   masstag {-2|--flac} [-C] [-T <titles-file>] [<tags>...] [--] 
+#	    [<audio-files>...]
+#
+# If <iaudio-files> are not specified on the command line, first they are read
+# from ./playlist, *.m3u, *.M3U, or *.M3u and then in the current directory
+# looking for *.mp3, *.MP3, *.Mp3, *.flac and *.FLAC files, and finally read
+# from the standard input.  FLAC and MP3 files must not be mixed.
+#
+# Options:
+#   -2			Write ID3v2 tags with id3v2(1).  Otherwise,
+#			mp3info(1) is used, but a warning is emitted
+#			if a tag is truncated due to ID3v1's limitations.
+#   --flac		Write FLAC tags with metaflac(1).  This option
+#			must be specified first if operating on FLAC
+#			files.
+#   -C			Commit changes.  If not specified, masstag just
+#			prints the commands it would execute.
+#   -T <titles-file>	Read and set the titles of <mp3-files> from
+#			<titles-file>, which should contain one title
+#			per line.  The number of titles should correspond
+#			to the number of <mp3-files>.
+#   -a <artist>, -{l|A} <album>, -y <year>, -g {<genre>|<genre-number>},
+#   -c <comment>	Set the specified tag.  Only specified tags are
+#			modified.
+#   --<TAG> <value>	Set the specified tag (-2 and --flac modes only).
+#   -n <trackno>	Designates the track number of the first file to
+#			be processed.  Subsequent files get increasing
+#			track numbers.  If not specified, track numbers
+#			remain untouched.
+#   --			End of options.
+
+# The maximum length of an ID3v1 tag's value.
+id3v1_maxlen=30;
+
+# Parse the command line.
+args=();
+track="";
+titles="";
+kind="id3v1";
+testing="echo";
+while [ $# -gt 0 ];
+do
+        case "$1" in
+        --)
+                break;
+                shift;
+                ;;
+        -C)
+                testing="";
+                shift;
+                ;;
+	-2)
+		kind="id3v2";
+		shift;
+		;;
+	--flac)
+		# metaflac options are totally different from mp3info's
+		# and id3v2's.  We need to be told beforehand to use it.
+		if [ ${#args[@]} -gt 0 ];
+		then
+			echo "$0: --flac should precede tags" >&2;
+			exit 1;
+		fi
+		kind="flac";
+		shift;
+		;;
+        -[aAlygcTn]|--[A-Z]*)
+		checklen="no";
+                if [ $# -lt 2 ];
+                then
+                        echo "$0: required parameter missing" >&2;
+                        exit 1;
+                elif [ "x$1" = "x-T" ];
+                then
+                        titles="$2";
+                elif [ "x$1" = "x-n" ];
+                then
+                        track="$2";
+		elif [ "x$1" = "x-A" -o "x$1" = "x-l" ];
+		then	# We accept both, but mp3info(1) and id3v2(1) need
+			# different arguments.
+			case "$kind" in
+			id3v1)
+				args[${#args[@]}]="-l";
+				args[${#args[@]}]="$2";
+				checklen="yes";
+				;;
+			id3v2)
+				args[${#args[@]}]="-A";
+				args[${#args[@]}]="$2";
+				;;
+			flac)
+				args[${#args[@]}]="--set-tag=ALBUM=$2";
+				;;
+			esac
+		elif [ "$kind" != "flac" ];
+		then
+			case "$1" in
+			-[ac])
+				# Check the length of artists and comments.
+				checklen="yes";
+				;;
+			--*)
+				if [ "$kind" = "id3v1" ];
+				then
+					echo "$0: $1 can't be used with " \
+						"ID3v1 tags" >&2;
+					exit 1;
+				fi
+				;;
+			esac
+
+			args[${#args[@]}]="$1";
+			args[${#args[@]}]="$2";
+		else	# $kind = "flac"
+			case "$1" in
+			-a)
+				tag="ARTIST";
+				;;
+			-y)
+				tag="DATE";
+				;;
+			-g)
+				tag="GENRE";
+				;;
+			-c)
+				tag="DESCRIPTION";
+				;;
+			--*)
+				tag="${1#--}";
+				;;
+			esac
+
+			args[${#args[@]}]="--set-tag=$tag=$2";
+                fi
+
+		# Check the tag value's lenght if necesssary.
+		if [ "$kind" = "id3v1" -a "$checklen" = "yes" \
+			-a ${#2} -gt $id3v1_maxlen ];
+		then
+			echo "$0: value of $1 is too long for ID3v1" >&2;
+		fi
+
+                shift 2;
+                ;;
+	--)
+		shift;
+		break;
+		;;
+        -*)
+                echo "$0: $1: unknown option" >&2;
+                exit 1;
+                ;;
+	*)
+                break;
+                ;;
+        esac
+done
+
+# Get the file names to be processed unless they're specified
+# on the command line.
+if [ $# -eq 0 ];
+then
+	found="no";
+	shopt -s nullglob;
+	for playlist in playlist *.m3u *.M3U *.M3u;
+	do	# Read from a playlist file
+		# Prevent bash from splitting on spaces.
+		[ -f "$playlist" ] || continue;
+		tmp="$IFS";
+		IFS="
+";
+		# Mind \r\n line endings.
+		set -- `tr -d '\r' < "$playlist"`;
+		IFS="$tmp";
+		found="yes";
+	done
+
+	if [ "$found" = "no" ];
+	then	# Fail, look for MP3 and FLAC files in the current directory.
+		if [ "$kind" = "flac" ];
+		then
+			set -- *.flac *.FLAC;
+		else
+			set -- *.mp3 *.MP3 *.M3u;
+		fi
+
+		if [ $# -eq 0 ];
+		then	# Fail, read from standard input.
+			while read mp3;
+			do
+				set -- "$@" "$mp3";
+			done
+		fi
+	fi
+fi
+
+# Anything to do?
+[ $# -gt 0 ] || exit 0;
+
+# Which $prog to use for setting the tags?
+case "$kind" in
+id3v1)
+	prog="mp3info";
+	;;
+id3v2)
+	prog="id3v2";
+	;;
+flac)
+	prog="metaflac";
+esac
+
+# Anything special to do?
+if [ "$titles" = "" -a "$track" = "" ];
+then
+	[ ${#args[@]} -gt 0 ] || exit 0;
+	exec $testing $prog "${args[@]}" -- "$@";
+fi
+
+# Run
+# We have six mode of operations: $titles or $track given or not,
+# and which $prog to use.
+if [ "$titles" != "" ];
+then
+	tr -d '\r' < "$titles" \
+	| while :;
+	do
+		# Get $fname.  Are we finished?
+		if [ $# -gt 0 ];
+		then
+			fname="$1";
+			shift;
+		else	# Check for excessive $titles.
+			read title;
+			if [ $? -eq 0 ];
+			then
+				echo "$0: too many titles" >&2;
+				exit 1;
+			fi
+			break;
+		fi
+
+		# Get the title for $fname.
+		read title;
+		if [ $? -ne 0 ];
+		then
+			echo "$0: out of titles" >&2;
+			exit 1;
+		fi
+		if [ "$kind" = "id3v1" -a ${#title} -gt $id3v1_maxlen ];
+		then
+			echo "$0: title is too long for ID3v1" >&2;
+		fi
+
+		# Set the tags for $fname.
+		if [ "$track" != "" ];
+		then
+			case "$kind" in
+			id3v1)
+				$testing $prog "${args[@]}" -t "$title" \
+					 -n "$track" -- "$fname";
+				;;
+			id3v2)
+				$testing $prog "${args[@]}" -t "$title" \
+					 -T "$track" -- "$fname";
+				;;
+			flac)
+				$testing $prog "${args[@]}" \
+					--set-tag=TITLE="$title" \
+					--set-tag=TRACKNUMBER="$track" \
+					-- "$fname";
+				;;
+			esac
+
+                        track=$((track+1));
+		elif [ "$kind" = "flac" ];
+		then
+                        $testing $prog "${args[@]}" --set-tag=TITLE="$title" \
+				-- "$fname";
+		else
+                        $testing $prog "${args[@]}" -t "$title" -- "$fname";
+		fi
+	done
+	[ $? -eq 0 ] || exit $?;
+else
+	for fname;
+	do
+		# Set the tags for $fname.
+		if [ "$track" != "" ];
+		then
+			case "$kind" in
+			id3v1)
+				$testing $prog "${args[@]}" -n "$track" \
+					-- "$fname";
+				;;
+			id3v2)
+				$testing $prog "${args[@]}" -T "$track" \
+					-- "$fname";
+				;;
+			flac)
+				$testing $prog "${args[@]}" \
+					--set-tag=TRACKNUMBER="$track" \
+					-- "$fname";
+				;;
+			esac
+
+                        track=$((track+1));
+		else
+                        $testing $prog "${args[@]}" -- "$fname";
+		fi
+	done
+fi
+
+# Done
+exit 0;
+
+# End of masstag
