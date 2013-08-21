@@ -1,0 +1,70 @@
+#!/bin/bash
+#
+# lsmp4 -- diaplay the user-metadata of MP4 files with ffmpeg
+#
+# Synopsis:
+#   lsmp4 [<mp4-files>]
+#
+# If <mp4-files> are not specified, *.mp4 and MP4 files will be considered.
+# This program probably works for other video formats, but I haven't tried
+# it yet.
+#
+
+# Gather input
+[ $# -gt 0 ] || set -- *.mp4 *.MP4;
+
+# Run
+for fname;
+do
+	# Skip $fname if it's actually a pattern that didn't match
+	# any files.
+	if [ "$fname" = '*.mp4' -o "$fname" = '*.MP4' ];
+	then
+		[ -f "$fname" ] || continue;
+	fi
+
+	# Execute ffprobe on $fname and read its results from stderr.
+	echo "$fname:";
+	ffprobe "$fname" 2>&1 \
+	| while read line;
+	do
+		# Skip input until the beginning of the first metadata
+		# section.
+		[ "$line" = "Metadata:" ] || continue;
+
+		# Read until up to and including Duration:.
+		while read key mid value;
+		do
+			case "$key" in
+			major_brand|minor_version|encoder|compatible_brands:)
+				# Skip these uninteresting tags.
+				continue;
+				;;
+			Duration:)
+				# It's not actually a metadata, but it's
+				# useful to show it.
+				value="${mid%,}";
+				;;
+			*)
+				key="$key:";
+				;;
+			esac
+
+			# Output $key and $value on separate lines,
+			# so that sed can process $key:s to capitalize
+			# them and to change underscores to spaces.
+			echo "$key";
+			echo "$value";
+
+			# End of metadata?
+			[ "$key" = "Duration:" ] && break;
+		done
+		break;
+	done | sed -e '1~2{s/.*/\u&/; y/_/ /;}' \
+	| while read key && read value;
+	do	# Show the final result with aligned $value;s.
+		printf '  %-15s %s\n' "$key" "$value";
+	done
+done
+
+# End of lsmp4

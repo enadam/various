@@ -1,15 +1,16 @@
 #!/bin/bash
 #
-# masstag -- tag MP3 and FLAC iles in batch
+# masstag -- tag MP3, FLAC and MP4 files in batch
 #
 # Synopsis:
-#   masstag {-2|--flac} [-C] [-T <titles-file>] [<tags>...] [--] 
-#	    [<audio-files>...]
+#   masstag {-2|--flac|--mp4} [-C] [-T <titles-file>] [<tags>...] [--] 
+#	    [<files>...]
 #
-# If <iaudio-files> are not specified on the command line, first they are read
-# from ./playlist, *.m3u, *.M3U, or *.M3u and then in the current directory
-# looking for *.mp3, *.MP3, *.Mp3, *.flac and *.FLAC files, and finally read
-# from the standard input.  FLAC and MP3 files must not be mixed.
+# If <files> are not specified on the command line, first they are read from
+# ./playlist, *.m3u, *.M3U, or *.M3u and then in the current directory
+# looking for *.mp3, *.flac and *.mp4 files with varying capitalization,
+# and finally from the standard input.  MP3, FLAC and MP4 files must not
+# be mixed.
 #
 # Options:
 #   -2			Write ID3v2 tags with id3v2(1).  Otherwise,
@@ -18,21 +19,44 @@
 #   --flac		Write FLAC tags with metaflac(1).  This option
 #			must be specified first if operating on FLAC
 #			files.
+#   --mp4		Write XMP (?) tags with ffmpeg(1).  Like --mp4,
+#			this option must precede any tagging option.
 #   -C			Commit changes.  If not specified, masstag just
 #			prints the commands it would execute.
-#   -T <titles-file>	Read and set the titles of <mp3-files> from
+#   -T <titles-file>	Read and set the titles of <files> from
 #			<titles-file>, which should contain one title
 #			per line.  The number of titles should correspond
-#			to the number of <mp3-files>.
-#   -a <artist>, -{l|A} <album>, -y <year>, -g {<genre>|<genre-number>},
-#   -c <comment>	Set the specified tag.  Only specified tags are
+#			to the number of <files>.
+#   -a <artist>, -{l|A} <album>, -t <title>, -g {<genre>|<genre-number>},
+#   -y <year>, -c <comment>
+#			Set the specified tag.  Only specified tags are
 #			modified.
-#   --<TAG> <value>	Set the specified tag (-2 and --flac modes only).
+#   --<TAG> <value>	Set the specified tag (-2, --flac, --mp4 modes only).
+#			Note that ffmpeg doesn't accept arbitrary tags.
 #   -n <trackno>	Designates the track number of the first file to
 #			be processed.  Subsequent files get increasing
 #			track numbers.  If not specified, track numbers
-#			remain untouched.
+#			remain untouched.  This switch doesn't make sense
+#			for video files.
 #   --			End of options.
+
+do_ffmpeg()
+{
+	local testing="$1";
+	local fname="$2";
+	shift 2;
+
+	tmpfile=`mktemp masstag-XXXXXX-$fname`;
+	if $testing ffmpeg -loglevel error \
+		-i "$fname" -c:v copy -c:a copy "$@" -y "$tmpfile";
+	then
+		$testing mv -f "$tmpfile" "$fname";
+		[ "$testing" = "" ] || rm "$tmpfile";
+	else
+		rm -f "$tmpfile";
+		exit 1;
+	fi
+}
 
 # The maximum length of an ID3v1 tag's value.
 id3v1_maxlen=30;
@@ -58,18 +82,19 @@ do
 		kind="id3v2";
 		shift;
 		;;
-	--flac)
-		# metaflac options are totally different from mp3info's
-		# and id3v2's.  We need to be told beforehand to use it.
+	--flac|--mp4)
+		# metaflac and ffmpeg options are totally different from
+		# mp3info's and id3v2's.  We need to be told beforehand
+		# to use it.
 		if [ ${#args[@]} -gt 0 ];
 		then
-			echo "$0: --flac should precede tags" >&2;
+			echo "$0: $1 should precede tags" >&2;
 			exit 1;
 		fi
-		kind="flac";
+		kind="${1#--}";
 		shift;
 		;;
-        -[aAlygcTn]|--[A-Z]*)
+        -[TnAlatgyc]|--[A-Z]*)
 		checklen="no";
                 if [ $# -lt 2 ];
                 then
@@ -80,6 +105,12 @@ do
                         titles="$2";
                 elif [ "x$1" = "x-n" ];
                 then
+			if [ "$kind" = "mp4" ];
+			then
+				echo "$0: cannot set track number " \
+					"for video files" >&2;
+				exit 1;
+			fi
                         track="$2";
 		elif [ "x$1" = "x-A" -o "x$1" = "x-l" ];
 		then	# We accept both, but mp3info(1) and id3v2(1) need
@@ -97,11 +128,67 @@ do
 			flac)
 				args[${#args[@]}]="--set-tag=ALBUM=$2";
 				;;
+			mp4)
+				args[${#args[@]}]="-metadata";
+				args[${#args[@]}]="Album=$2";
+				;;
 			esac
-		elif [ "$kind" != "flac" ];
+		elif [ "$titles" != "" -a "x$1" = "x-t" ];
+		then
+			echo "$0: -t and -T are mutually exclusive" >&2;
+			exit 1;
+		elif [ "$kind" = "mp4" ];
 		then
 			case "$1" in
-			-[ac])
+			-a)
+				tag="Composer";
+				;;
+			-t)
+				tag="Title";
+				;;
+			-g)
+				tag="Genre";
+				;;
+			-y)
+				tag="Date";
+				;;
+			-c)
+				tag="Comment";
+				;;
+			--*)
+				tag="${1#--}";
+				;;
+			esac
+
+			args[${#args[@]}]="-metadata";
+			args[${#args[@]}]="$tag=$2";
+		elif [ "$kind" = "flac" ];
+		then
+			case "$1" in
+			-a)
+				tag="ARTIST";
+				;;
+			-t)
+				tag="TITLE";
+				;;
+			-g)
+				tag="GENRE";
+				;;
+			-y)
+				tag="DATE";
+				;;
+			-c)
+				tag="DESCRIPTION";
+				;;
+			--*)
+				tag="${1#--}";
+				;;
+			esac
+
+			args[${#args[@]}]="--set-tag=$tag=$2";
+		else # id3v1 or id3v2
+			case "$1" in
+			-[atc])
 				# Check the length of artists and comments.
 				checklen="yes";
 				;;
@@ -117,26 +204,6 @@ do
 
 			args[${#args[@]}]="$1";
 			args[${#args[@]}]="$2";
-		else	# $kind = "flac"
-			case "$1" in
-			-a)
-				tag="ARTIST";
-				;;
-			-y)
-				tag="DATE";
-				;;
-			-g)
-				tag="GENRE";
-				;;
-			-c)
-				tag="DESCRIPTION";
-				;;
-			--*)
-				tag="${1#--}";
-				;;
-			esac
-
-			args[${#args[@]}]="--set-tag=$tag=$2";
                 fi
 
 		# Check the tag value's lenght if necesssary.
@@ -183,11 +250,14 @@ then
 
 	if [ "$found" = "no" ];
 	then	# Fail, look for MP3 and FLAC files in the current directory.
-		if [ "$kind" = "flac" ];
+		if [ "$kind" = "mp4" ];
+		then
+			set -- *.mp4 *.MP4 *.Mp4;
+		elif [ "$kind" = "flac" ];
 		then
 			set -- *.flac *.FLAC;
 		else
-			set -- *.mp3 *.MP3 *.M3u;
+			set -- *.mp3 *.MP3 *.Mp3;
 		fi
 
 		if [ $# -eq 0 ];
@@ -213,17 +283,30 @@ id3v2)
 	;;
 flac)
 	prog="metaflac";
+	;;
+mp4)
+	prog="ffmpeg";
+	;;
 esac
 
 # Anything special to do?
 if [ "$titles" = "" -a "$track" = "" ];
 then
 	[ ${#args[@]} -gt 0 ] || exit 0;
-	exec $testing $prog "${args[@]}" -- "$@";
+	if [ "$prog" = "ffmpeg" ];
+	then
+		for fname;
+		do
+			do_ffmpeg "$testing" "$fname" "${args[@]}";
+		done
+		exit;
+	else
+		exec $testing $prog "${args[@]}" -- "$@";
+	fi
 fi
 
 # Run
-# We have six mode of operations: $titles or $track given or not,
+# We have many mode of operations: $titles or $track given or not,
 # and which $prog to use.
 if [ "$titles" != "" ];
 then
@@ -278,11 +361,15 @@ then
 			esac
 
                         track=$((track+1));
+		elif [ "$prog" = "ffmpeg" ];
+		then
+			do_ffmpeg "$testing" "$fname" "${args[@]}" \
+				-metadata Title="$title";
 		elif [ "$kind" = "flac" ];
 		then
                         $testing $prog "${args[@]}" --set-tag=TITLE="$title" \
 				-- "$fname";
-		else
+		else	# mp3
                         $testing $prog "${args[@]}" -t "$title" -- "$fname";
 		fi
 	done
@@ -310,6 +397,9 @@ else
 			esac
 
                         track=$((track+1));
+		elif [ "$prog" = "ffmpeg" ];
+		then
+			do_ffmpeg "$testing" "$fname" "${args[@]}";
 		else
                         $testing $prog "${args[@]}" -- "$fname";
 		fi
