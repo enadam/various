@@ -5168,7 +5168,7 @@ int main(int argc, char const *const *argv)
               "%3$*2$s {<xid>|<name>|root|overlay|wm|new|top|top-<type>|select}...\n"
 #ifdef CONFIG_FEATURES
 # define FEATURE(str)      " " str
-              "built with" CONFIG_FEATURES "\n"
+              "Built with" CONFIG_FEATURES ".\n"
 #endif
               , argv[0], (unsigned)strlen(argv[0]), "");
       return 0;
