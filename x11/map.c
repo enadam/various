@@ -2560,16 +2560,17 @@ static rgb_st mkrgb(unsigned char r, unsigned char g, unsigned char b,
 /* Returns the length of $n in decimal representation. */
 static unsigned digitsof(unsigned long n)
 {
-	unsigned d;
+  unsigned d;
 
-	d = 0;
-	do
-	{
-		d++;
-		n /= 10;
-	} while (n);
+  d = 0;
+  do
+    {
+      d++;
+      n /= 10;
+    }
+  while (n);
 
-	return d;
+  return d;
 } /* digitsof */
 
 /*
@@ -2581,22 +2582,22 @@ static unsigned digitsof(unsigned long n)
  */
 static char *fname_template(char const *str)
 {
-	static unsigned cnt;
-	char const *in;
-	char *out, *ret;
-	struct timeval tv;
-	struct tm const *tm;
-	unsigned tmpcnt, lout;
+  static unsigned cnt;
+  char const *in;
+  char *out, *ret;
+  struct timeval tv;
+  struct tm const *tm;
+  unsigned tmpcnt, lout;
 
-	/* Is this a template? */
-	if (!(str[0] == '/' && str[1] && str[strlen(str)-1] == '/'))
-		return NULL;
+  /* Is this a template? */
+  if (!(str[0] == '/' && str[1] && str[strlen(str)-1] == '/'))
+    return NULL;
 
-	/* Parse what's inside the // and see how much space we need. */
-	str++;
-	tm = NULL;
-	tmpcnt = cnt;
-	for (in = str, lout = 0; !(in[0] == '/' && !in[1]); )
+  /* Parse what's inside the // and see how much space we need. */
+  str++;
+  tm = NULL;
+  tmpcnt = cnt;
+  for (in = str, lout = 0; !(in[0] == '/' && !in[1]); )
     {
       char c;
       unsigned minwidth, i;
@@ -2611,7 +2612,7 @@ static char *fname_template(char const *str)
       /* See what to substitute. */
       i = 1;
       if (strspn(in, "YMDhmsuStT"))
-        {	/* Time.  Get it if we haven't. */
+        { /* Time.  Get it if we haven't. */
           if (!tm)
             {
               time_t t;
@@ -2640,14 +2641,14 @@ static char *fname_template(char const *str)
         /* The counter. */
         lout += digitsof(tmpcnt++);
       else if (sscanf(in, "%u%c%n", &minwidth, &c, &i) >= 2)
-        {	/* The counter, in a specified width. */
+        { /* The counter, in a specified width. */
           if (c == 'c')
-            {	/* Do increment the counter in order to be
+            { /* Do increment the counter in order to be
                * up to date about its decimal length. */
               lout += larger(minwidth, digitsof(tmpcnt++));
             }
           else if (c == 'C')
-            {	/* Always print as many digits as the counter
+            { /* Always print as many digits as the counter
                * can maximally have. */
               if (minwidth < 1)
                 die("bad prec\n");
@@ -2656,7 +2657,7 @@ static char *fname_template(char const *str)
           else
             die("syntax error\n");
         } else if (*in == '%')
-        lout++;
+          lout++;
       else
         die("syntax error\n");
 
@@ -2700,28 +2701,22 @@ static char *fname_template(char const *str)
         o = snprintf(out, lout, "%.6lu", tv.tv_usec);
       else if (*in == 't')
         o = snprintf(out, lout,
-          "%.4u-%.2u-%.2u_%.2u:%.2u:%.2u",
-          1900+tm->tm_year, 1+tm->tm_mon, tm->tm_mday,
-          tm->tm_hour, tm->tm_min, tm->tm_sec);
+                     "%.4u-%.2u-%.2u_%.2u:%.2u:%.2u",
+                     1900+tm->tm_year, 1+tm->tm_mon, tm->tm_mday,
+                     tm->tm_hour, tm->tm_min, tm->tm_sec);
       else if (*in == 'S')
         o = snprintf(out, lout, "%lu", tv.tv_sec);
       else if (*in == 'T')
-        o = snprintf(out, lout, "%lu.%.6lu",
-          tv.tv_sec, tv.tv_usec);
+        o = snprintf(out, lout, "%lu.%.6lu", tv.tv_sec, tv.tv_usec);
       else if (*in == 'c')
         o = snprintf(out, lout, "%u", cnt++);
       else if (sscanf(in, "%u%c%n", &minwidth, &c, &i) >= 2)
         {
           if (c == 'c')
-            {
-              o = snprintf(out, lout, "%0*u",
-                minwidth, cnt++);
-            }
+            o = snprintf(out, lout, "%0*u", minwidth, cnt++);
           else if (c == 'C')
             {
-              o = snprintf(out, lout, "%0*u",
-                  digitsof(minwidth-1),
-                  cnt++);
+              o = snprintf(out, lout, "%0*u", digitsof(minwidth-1), cnt++);
               cnt %= minwidth;
             }
         }
@@ -2737,11 +2732,11 @@ static char *fname_template(char const *str)
       lout -= o;
     } /* until finished output */
 
-	/* Verify that we've consumed all input (and didn't overrun). */
-	assert(in[0] == '/' && !in[1]);
-	*out = '\0';
+  /* Verify that we've consumed all input (and didn't overrun). */
+  assert(in[0] == '/' && !in[1]);
+  *out = '\0';
 
-	return ret;
+  return ret;
 } /* fname_template */
 
 #ifdef HAVE_GDK_PIXBUF
@@ -5435,4 +5430,6 @@ int main(int argc, char const *const *argv)
 
 #define END_OF_PROGRAM          /* End of map.c */
 END_OF_PROGRAM
-/* vim: set foldmethod=marker: */
+/* vim: set cindent  cinoptions=>4,n-2,{2,^-2,\:2,=2,g0,h2,p5,t0,+2,(0,u0,w1,m1: */
+/* vim: set expandtab shiftwidth=2 softtabstop=2: */
+/* vim: set formatoptions=croql foldmethod=marker: */
