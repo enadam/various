@@ -2601,16 +2601,17 @@ static rgb_st mkrgb(unsigned char r, unsigned char g, unsigned char b,
 /* Returns the length of $n in decimal representation. */
 static unsigned digitsof(unsigned long n)
 {
-	unsigned d;
+  unsigned d;
 
-	d = 0;
-	do
-	{
-		d++;
-		n /= 10;
-	} while (n);
+  d = 0;
+  do
+    {
+      d++;
+      n /= 10;
+    }
+  while (n);
 
-	return d;
+  return d;
 } /* digitsof */
 
 /*
@@ -2622,22 +2623,22 @@ static unsigned digitsof(unsigned long n)
  */
 static char *fname_template(char const *str)
 {
-	static unsigned cnt;
-	char const *in;
-	char *out, *ret;
-	struct timeval tv;
-	struct tm const *tm;
-	unsigned tmpcnt, lout;
+  static unsigned cnt;
+  char const *in;
+  char *out, *ret;
+  struct timeval tv;
+  struct tm const *tm;
+  unsigned tmpcnt, lout;
 
-	/* Is this a template? */
-	if (!(str[0] == '/' && str[1] && str[strlen(str)-1] == '/'))
-		return NULL;
+  /* Is this a template? */
+  if (!(str[0] == '/' && str[1] && str[strlen(str)-1] == '/'))
+    return NULL;
 
-	/* Parse what's inside the // and see how much space we need. */
-	str++;
-	tm = NULL;
-	tmpcnt = cnt;
-	for (in = str, lout = 0; !(in[0] == '/' && !in[1]); )
+  /* Parse what's inside the // and see how much space we need. */
+  str++;
+  tm = NULL;
+  tmpcnt = cnt;
+  for (in = str, lout = 0; !(in[0] == '/' && !in[1]); )
     {
       char c;
       unsigned minwidth, i;
@@ -2652,7 +2653,7 @@ static char *fname_template(char const *str)
       /* See what to substitute. */
       i = 1;
       if (strspn(in, "YMDhmsuStT"))
-        {	/* Time.  Get it if we haven't. */
+        { /* Time.  Get it if we haven't. */
           if (!tm)
             {
               time_t t;
@@ -2681,14 +2682,14 @@ static char *fname_template(char const *str)
         /* The counter. */
         lout += digitsof(tmpcnt++);
       else if (sscanf(in, "%u%c%n", &minwidth, &c, &i) >= 2)
-        {	/* The counter, in a specified width. */
+        { /* The counter, in a specified width. */
           if (c == 'c')
-            {	/* Do increment the counter in order to be
+            { /* Do increment the counter in order to be
                * up to date about its decimal length. */
               lout += larger(minwidth, digitsof(tmpcnt++));
             }
           else if (c == 'C')
-            {	/* Always print as many digits as the counter
+            { /* Always print as many digits as the counter
                * can maximally have. */
               if (minwidth < 1)
                 die("bad prec\n");
@@ -2697,7 +2698,7 @@ static char *fname_template(char const *str)
           else
             die("syntax error\n");
         } else if (*in == '%')
-        lout++;
+          lout++;
       else
         die("syntax error\n");
 
@@ -2741,28 +2742,22 @@ static char *fname_template(char const *str)
         o = snprintf(out, lout, "%.6lu", tv.tv_usec);
       else if (*in == 't')
         o = snprintf(out, lout,
-          "%.4u-%.2u-%.2u_%.2u:%.2u:%.2u",
-          1900+tm->tm_year, 1+tm->tm_mon, tm->tm_mday,
-          tm->tm_hour, tm->tm_min, tm->tm_sec);
+                     "%.4u-%.2u-%.2u_%.2u:%.2u:%.2u",
+                     1900+tm->tm_year, 1+tm->tm_mon, tm->tm_mday,
+                     tm->tm_hour, tm->tm_min, tm->tm_sec);
       else if (*in == 'S')
         o = snprintf(out, lout, "%lu", tv.tv_sec);
       else if (*in == 'T')
-        o = snprintf(out, lout, "%lu.%.6lu",
-          tv.tv_sec, tv.tv_usec);
+        o = snprintf(out, lout, "%lu.%.6lu", tv.tv_sec, tv.tv_usec);
       else if (*in == 'c')
         o = snprintf(out, lout, "%u", cnt++);
       else if (sscanf(in, "%u%c%n", &minwidth, &c, &i) >= 2)
         {
           if (c == 'c')
-            {
-              o = snprintf(out, lout, "%0*u",
-                minwidth, cnt++);
-            }
+            o = snprintf(out, lout, "%0*u", minwidth, cnt++);
           else if (c == 'C')
             {
-              o = snprintf(out, lout, "%0*u",
-                  digitsof(minwidth-1),
-                  cnt++);
+              o = snprintf(out, lout, "%0*u", digitsof(minwidth-1), cnt++);
               cnt %= minwidth;
             }
         }
@@ -2778,11 +2773,11 @@ static char *fname_template(char const *str)
       lout -= o;
     } /* until finished output */
 
-	/* Verify that we've consumed all input (and didn't overrun). */
-	assert(in[0] == '/' && !in[1]);
-	*out = '\0';
+  /* Verify that we've consumed all input (and didn't overrun). */
+  assert(in[0] == '/' && !in[1]);
+  *out = '\0';
 
-	return ret;
+  return ret;
 } /* fname_template */
 
 #ifdef HAVE_GDK_PIXBUF
@@ -2829,6 +2824,7 @@ static char const *determine_output_format(char const *fname)
 static void open_image(struct image_st *img, char const *fname,
                        unsigned width, unsigned height, Bool has_alpha)
 {
+  static int warned;
   char *tfname;
   memset(img, 0, sizeof(*img));
   img->has_alpha = has_alpha;
@@ -2872,12 +2868,22 @@ static void open_image(struct image_st *img, char const *fname,
     die("cannot write image\n");
 #endif /* HAVE_QT */
 
-  /* Write straight RGB. */
+  /* Write straight RGB.  If this is the only format we support (because of
+   * the lack of toolkits), warn the user the first time we emit an image. */
+#if !defined(HAVE_GDK_PIXBUF) && !defined(HAVE_QT)
+  if (!warned)
+    {
+      fputs("Warning: writing raw RGB image.  You can convert it to PNG "
+            "by the following ImageMagick command:\n", stderr);
+      warned = 1;
+    }
+#endif /* ! HAVE_GDK_PIXBUF && ! HAVE_QT */
   if (!(img->st = fopen(fname, "w")))
     die("couldn't open output file\n");
-  printf("convert -size %ux%u -depth 8 %s:'%s' '%s.png'\n",
+  printf("convert -size %ux%u -depth 8 %s:'%s' '%s.png';\n",
          width, height, has_alpha ? "rgba" : "rgb",
          fname, fname);
+  fflush(stdout);
   free(tfname);
 } /* open_image */
 
@@ -2941,7 +2947,7 @@ static void close_image(struct image_st *img)
  * to $fname. */
 static void save_rgb_image(char const *fname, unsigned char const *in,
                            unsigned width, unsigned height,
-                           unsigned bpp, unsigned row,
+                           unsigned depth, unsigned bpp, unsigned row,
                            unsigned red, unsigned green, unsigned blue)
 {
   unsigned alpha;
@@ -2949,9 +2955,9 @@ static void save_rgb_image(char const *fname, unsigned char const *in,
   unsigned inner, outer;
 
   /* Assume there's an alpha channel if the color masks don't cover
-   * the full $bpp.  Be pedantic about not overflowing if it's 32. */
+   * the full $depth.  Be pedantic about not overflowing if it's 32. */
   assert(red && green && blue);
-  alpha = ((((1 << (bpp-1)) - 1) << 1) | 1) & ~(red|green|blue);
+  alpha = ((((1 << (depth-1)) - 1) << 1) | 1) & ~(red|green|blue);
 
   /* If $Rotated start scanning from bottom-left and traverse up/right. */
   assert(width > 0 && height > 0);
@@ -4317,7 +4323,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
 
                 save_rgb_image(optarg, (unsigned char const *)img->data,
                         attrs.width, attrs.height,
-                        img->bits_per_pixel, img->bytes_per_line,
+                        img->depth, img->bits_per_pixel, img->bytes_per_line,
                         img->red_mask, img->green_mask, img->blue_mask);
                 XDestroyImage(img);
               }
@@ -4396,7 +4402,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
 
                 if (format == RGB)
                   save_rgb_image(optarg, fbdup, width, height,
-                                 bpp, row, red, green, blue);
+                                 bpp, bpp, row, red, green, blue);
                 else if (format == YUV422)
                   save_yuv_image(optarg, fbdup, row, width, height);
 
@@ -4486,7 +4492,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
 
                     save_rgb_image(optarg, img,
                             attrs.width, attrs.height,
-                            roundto(attrs.depth, 8), pitch,
+                            attrs.depth, roundto(attrs.depth, 8), pitch,
                             attrs.visual->red_mask,
                             attrs.visual->green_mask,
                             attrs.visual->blue_mask);
@@ -5829,7 +5835,7 @@ int main(int argc, char const *const *argv)
               "%3$*2$s {<xid>|<name>|root|overlay|wm|new|top|top-<type>|select}...\n"
 #ifdef CONFIG_FEATURES
 # define FEATURE(str)      " " str
-              "built with" CONFIG_FEATURES "\n"
+              "Built with" CONFIG_FEATURES ".\n"
 #endif
               , argv[0], (unsigned)strlen(argv[0]), "");
       return 0;
@@ -6085,4 +6091,6 @@ int main(int argc, char const *const *argv)
 
 #define END_OF_PROGRAM          /* End of map.c */
 END_OF_PROGRAM
-/* vim: set foldmethod=marker: */
+/* vim: set cindent  cinoptions=>4,n-2,{2,^-2,\:2,=2,g0,h2,p5,t0,+2,(0,u0,w1,m1: */
+/* vim: set expandtab shiftwidth=2 softtabstop=2: */
+/* vim: set formatoptions=croql foldmethod=marker: */
