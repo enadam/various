@@ -2788,6 +2788,7 @@ static char const *determine_output_format(char const *fname)
 static void open_image(struct image_st *img, char const *fname,
                        unsigned width, unsigned height, Bool has_alpha)
 {
+  static int warned;
   char *tfname;
   memset(img, 0, sizeof(*img));
   img->has_alpha = has_alpha;
@@ -2831,12 +2832,22 @@ static void open_image(struct image_st *img, char const *fname,
     die("cannot write image\n");
 #endif /* HAVE_QT */
 
-  /* Write straight RGB. */
+  /* Write straight RGB.  If this is the only format we support (because of
+   * the lack of toolkits), warn the user the first time we emit an image. */
+#if !defined(HAVE_GDK_PIXBUF) && !defined(HAVE_QT)
+  if (!warned)
+    {
+      fputs("Warning: writing raw RGB image.  You can convert it to PNG "
+            "by the following ImageMagick command:\n", stderr);
+      warned = 1;
+    }
+#endif /* ! HAVE_GDK_PIXBUF && ! HAVE_QT */
   if (!(img->st = fopen(fname, "w")))
     die("couldn't open output file\n");
-  printf("convert -size %ux%u -depth 8 %s:'%s' '%s.png'\n",
+  printf("convert -size %ux%u -depth 8 %s:'%s' '%s.png';\n",
          width, height, has_alpha ? "rgba" : "rgb",
          fname, fname);
+  fflush(stdout);
   free(tfname);
 } /* open_image */
 
