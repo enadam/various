@@ -2911,7 +2911,7 @@ static void close_image(struct image_st *img)
  * to $fname. */
 static void save_rgb_image(char const *fname, unsigned char const *in,
                            unsigned width, unsigned height,
-                           unsigned bpp, unsigned row,
+                           unsigned depth, unsigned bpp, unsigned row,
                            unsigned red, unsigned green, unsigned blue)
 {
   unsigned alpha;
@@ -2919,9 +2919,9 @@ static void save_rgb_image(char const *fname, unsigned char const *in,
   unsigned inner, outer;
 
   /* Assume there's an alpha channel if the color masks don't cover
-   * the full $bpp.  Be pedantic about not overflowing if it's 32. */
+   * the full $depth.  Be pedantic about not overflowing if it's 32. */
   assert(red && green && blue);
-  alpha = ((((1 << (bpp-1)) - 1) << 1) | 1) & ~(red|green|blue);
+  alpha = ((((1 << (depth-1)) - 1) << 1) | 1) & ~(red|green|blue);
 
   /* If $Rotated start scanning from bottom-left and traverse up/right. */
   assert(width > 0 && height > 0);
@@ -3679,7 +3679,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
 
                 save_rgb_image(optarg, (unsigned char const *)img->data,
                         attrs.width, attrs.height,
-                        img->bits_per_pixel, img->bytes_per_line,
+                        img->depth, img->bits_per_pixel, img->bytes_per_line,
                         img->red_mask, img->green_mask, img->blue_mask);
                 XDestroyImage(img);
               }
@@ -3758,7 +3758,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
 
                 if (format == RGB)
                   save_rgb_image(optarg, fbdup, width, height,
-                                 bpp, row, red, green, blue);
+                                 bpp, bpp, row, red, green, blue);
                 else if (format == YUV422)
                   save_yuv_image(optarg, fbdup, row, width, height);
 
@@ -3848,7 +3848,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
 
                     save_rgb_image(optarg, img,
                             attrs.width, attrs.height,
-                            roundto(attrs.depth, 8), pitch,
+                            attrs.depth, roundto(attrs.depth, 8), pitch,
                             attrs.visual->red_mask,
                             attrs.visual->green_mask,
                             attrs.visual->blue_mask);
