@@ -3,22 +3,46 @@
   : are available.
   pkgs="x11";
   optional="xfixes xext xcomposite xtst xi xres xft";
-  for pkg in $optional;
-  do
-    : Leave xinput out if not building with xtst,
-    : because we would not use it.
-    [ "$pkg" = "xi" -a "$with_xtst" = "no" ] \
-      && continue;
 
-    define="$pkg";
-    eval with=\$with_$define;
-    [ "$with" = no ]  && continue;
-    pkg-config "$pkg" || continue;
+  : We can live without pkg-config if we must, but we will be very limited.
+  if pkg-config --version > /dev/null 2>&1;
+  then
+    have_pkgconf="yes";
 
-    pkgs="$pkgs $pkg";
-    defines="$defines $define";
-    eval with_$define="yes";
-  done
+    : Verify that requred $pkgs are installed.
+    if ! pkg-config $pkgs;
+    then
+      echo "$pkgs are required" >&2;
+      exit 1;
+    fi
+
+    for pkg in $optional;
+    do
+      : Leave xinput out if not building with xtst,
+      : because we would not use it.
+      [ "$pkg" = "xi" -a "$with_xtst" = "no" ] \
+        && continue;
+
+      define="$pkg";
+      eval with=\$with_$define;
+      [ "$with" = no ]  && continue;
+      pkg-config "$pkg" || continue;
+
+      pkgs="$pkgs $pkg";
+      defines="$defines $define";
+      eval with_$define="yes";
+    done
+  else
+    if [ ! -d /usr/include/X11 ];
+    then
+      echo "libx11-dev is required" >&2;
+      exit 1;
+    fi
+
+    echo "Warning: pkg-config not found, cannot test for optional features" \
+      >&2;
+    have_pkgconf="no";
+  fi
 
   : These are safe to enable every time autodetected
   : because they do not depend on libraries.
@@ -49,20 +73,23 @@
   lang="-x c";
 
   : Decide which toolkit to link with.  Prefer C, as it compiles faster.
-  [ "$with_qt" != "no" ] && pkg-config QtGui \
-    || with_qt="no";
-  [ "$with_gdk_pixbuf" != "no" ] && pkg-config gdk-pixbuf-2.0 \
-    || with_gdk_pixbuf="no";
-  if [ "$with_gdk_pixbuf" != "no" -a "$with_qt" != "yes" ];
+  if [ "$have_pkgconf" = "yes" ];
   then
-    pkgs="$pkgs gdk-pixbuf-2.0";
-    defines="$defines gdk_pixbuf";
-  elif [ "$with_qt" != "no" ]
-  then
-    pkgs="$pkgs QtGui";
-    defines="$defines qt";
-    : ${CC:="c++"};
-    lang="-x c++";
+    [ "$with_qt" != "no" ] && pkg-config QtGui \
+      || with_qt="no";
+    [ "$with_gdk_pixbuf" != "no" ] && pkg-config gdk-pixbuf-2.0 \
+      || with_gdk_pixbuf="no";
+    if [ "$with_gdk_pixbuf" != "no" -a "$with_qt" != "yes" ];
+    then
+      pkgs="$pkgs gdk-pixbuf-2.0";
+      defines="$defines gdk_pixbuf";
+    elif [ "$with_qt" != "no" ]
+    then
+      pkgs="$pkgs QtGui";
+      defines="$defines qt";
+      : ${CC:="c++"};
+      lang="-x c++";
+    fi
   fi
 
   : ${CC:="cc"};
@@ -95,8 +122,13 @@
   fi
 
   : We need sqrt to calculate Eucledian distances.
-  CFLAGS="$CFLAGS `pkg-config --cflags $pkgs`";
-  LIBS="`pkg-config --libs $pkgs` -lm";
+  if [ "$have_pkgconf" = "yes" ];
+  then
+    CFLAGS="$CFLAGS `pkg-config --cflags $pkgs`";
+    LIBS="-lm `pkg-config --libs $pkgs`";
+  else
+    LIBS="-lm -lX11";
+  fi
   echo "This program is free software.  It does whatever it wants.";
 
   : Build or simply echo the compilation command line.
