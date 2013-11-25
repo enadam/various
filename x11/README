@@ -1,3 +1,4 @@
 map.c			X window manipulator
 map-dev.c		map.c with incomplete event generation functionality
+map.fremantle		map.c compiled for Fremantle with all features
 xevil.c			X window monitor
