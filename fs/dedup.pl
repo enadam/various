@@ -39,6 +39,7 @@
 #
 # By default, if no <files-and-directories> are given the current directory
 # is scanned.
+#
 
 # Modules
 use strict;
@@ -218,7 +219,7 @@ find({
 		}
 
 		# Skip everything other than readable regular files.
-		($dev, $ino, undef, undef, undef, undef, undef, $size) = stat;
+		($dev, $ino, undef, undef, undef, undef, undef, $size) = lstat;
 		return if ! -f _ || -l _ || ! -r _;
 
 		# The $key is the unique identifier of an inode.
