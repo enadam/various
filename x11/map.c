@@ -58,6 +58,13 @@
     CFLAGS="$CFLAGS -I/usr/include/SGX/include4";
     CFLAGS="$CFLAGS -DHAVE_SGX";
   fi
+  if [ -f /targets/links/scratchbox.config ];
+  then
+    : Check for Fremantle.
+    source /targets/links/scratchbox.config;
+    [ "$SBOX_CROSS_GCC_NAME" = "cs2007q3-glibc2.5-arm7" ] \
+      && defines="$defines fremantle";
+  fi
 
   : We can take advantage of XRes 1.2, but unfortunately the package
   : version does not reflect the extension version in Harmattan.
@@ -65,7 +72,7 @@
     && grep -wq XResQueryClientIds /usr/include/X11/extensions/XRes.h \
     && defines="$defines xres_12";
 
-  : Probably if there is xi there is xi2 too, but who knows.
+  : Check for xi2.
   [ "$with_xi" = "yes" -a -f /usr/include/X11/extensions/XInput2.h ] \
     && defines="$defines xi2";
 
@@ -4239,6 +4246,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
               break;
             }
 
+#ifdef HAVE_FREMANTLE
           /* Control a hildon animation actor. */
           case 'A':
             {
@@ -4298,6 +4306,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                          SubstructureNotifyMask, &ev);
               break;
             }
+#endif /* HAVE_FREMANTLE */
 
           /* Change window attributes */
           case 'o':
