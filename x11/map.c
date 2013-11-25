@@ -2825,7 +2825,7 @@ static char const *determine_output_format(char const *fname)
 static void open_image(struct image_st *img, char const *fname,
                        unsigned width, unsigned height, Bool has_alpha)
 {
-  static int warned;
+  static __attribute__((unused)) int warned;
   char *tfname;
   memset(img, 0, sizeof(*img));
   img->has_alpha = has_alpha;
