@@ -2225,26 +2225,29 @@ static void print_info(Drawable win, Bool recursive, unsigned level)
 
 #ifdef HAVE_XRES
 # ifndef HAVE_XRES_12
-typedef struct
-{
-  XID client, mask;
-} XResClientIdSpec;
+typedef int XResNClients;
+typedef XResClient XResClientIdValue;
 
 typedef struct
 {
-  XResClientIdSpec spec;
-} XResClientIdValue;
+  XID client;
+  unsigned mask;
+} XResClientIdSpec;
 
 /* These calls are only available in XRes 1.2.  To keep things simple
  * and make it possible to use the new interface unconditionally,
  * emulate what we can with the old interface. */
 #  define XRES_CLIENT_ID_PID_MASK           0
 #  define XResGetClientPid(v)             (-1)
-#  define XResQueryClientIds(dpy, nspecs, specs, nclients, clients) \
-          XResQueryClients(dpy, (int*)nclients, (XResClient**)clients)
+#  define XResQueryClientIds(dpy, nspecs, specs, nclientsp, clients) \
+          XResQueryClients(dpy, nclientsp, clients)
 #  define XResClientIdsDestroy(nclients, clients)                   \
           XFree(clients)
-# endif /* ! HAVE_XRES_12 */
+#  define XRESCLIENT(client, i)           (clients)[i].resource_base
+# else /* HAVE_XRES_12 */
+typedef long XResNClients;
+#  define XRESCLIENT(client, i)           (clients)[i].spec.client
+# endif
 
 /* qsort() comparator to order a list of XResType:s by resource_type. */
 static int cmpxres(void const *lhs, void const *rhs)
@@ -2462,9 +2465,9 @@ whitelisted:
  * and print it out nicely formatted. */
 static void print_resources(Window win, enum resource_listing_t what)
 {
-  long nclients;
   int foo, nresources;
   XResType *resources;
+  XResNClients nclients;
   unsigned long spixmaps;
 
   nclients = 0;
@@ -2476,7 +2479,7 @@ static void print_resources(Window win, enum resource_listing_t what)
     }
   else
     {
-      long i;
+      XResNClients i;
       XResClientIdSpec spec;
       XResClientIdValue *clients;
 
@@ -2501,7 +2504,7 @@ static void print_resources(Window win, enum resource_listing_t what)
           int nitsres, plus;
           unsigned long itspixmaps;
 
-          client = clients[i].spec.client;
+          client = XRESCLIENT(clients, i);
 
           /* $itsres := this $client's resources */
           XResQueryClientPixmapBytes(Dpy, client, &itspixmaps);
@@ -2520,7 +2523,7 @@ static void print_resources(Window win, enum resource_listing_t what)
           if (what == EACH_CLIENT)
             { /* Client XID and the number of elements in $resources
                * pertaining to it. */
-              resources[nresources].resource_type = clients[i].spec.client;
+              resources[nresources].resource_type = XRESCLIENT(clients, i);
               resources[nresources].count = plus;
               nresources++;
 
