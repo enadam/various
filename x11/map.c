@@ -562,7 +562,7 @@
  *        # eg. "+10+10", "+0.1+10+10", "+0.1-10+10"
  *
  * size   := "fs" | {<dim> 'x' <dim>}
- *        # "fs": fullscreen, ".5x.5": quarter of the screen, 
+ *        # "fs": fullscreen, ".5x.5": quarter of the screen,
  *        # "1.0x0.5-20": full-width and 20px shorter than half of the height,
  *        # "-20x-20": 20px shorter and narrower than the full screen
  * geo    := <size> [<pos>]
@@ -1353,7 +1353,7 @@ static char const *get_geometry(char const *str, XRectangle *geo)
       return str + 2;
     }
 
-  if (!(p1 = get_dims_or_coords(str, 
+  if (!(p1 = get_dims_or_coords(str,
                                 (short*)&geo->width, (short*)&geo->height,
                                 True, True, True)))
     die("invalid geometry\n");
@@ -1578,7 +1578,7 @@ static Bool find_client_window(Window *win, char const *name,
       XWindowAttributes attrs;
 
       /* Reject stupid 1x1 windows. */
-      ours = XGetWindowAttributes(Dpy, *win, &attrs) 
+      ours = XGetWindowAttributes(Dpy, *win, &attrs)
         && (attrs.width > 1 && attrs.height > 1);
       if (ours && wintype)
         { /* Match $wintype. */
@@ -2984,7 +2984,7 @@ static void save_rgb_image(char const *fname, unsigned char const *in,
           before = p;
           for (px = o = 0; o < bpp; o += 8)
             px |= *p++ << o;
-          write_image(&out, 
+          write_image(&out,
                       mkrgb(mask_pixel(px, red),
                             mask_pixel(px, green),
                             mask_pixel(px, blue),
@@ -3819,7 +3819,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                  * comes from fbdev. */
                 get_win_attrs(win, &attrs, True, &visual);
                 fbbits = 5;
-                sgx_pitch_align = attrs.width < EURASIA_TAG_STRIDE_THRESHOLD 
+                sgx_pitch_align = attrs.width < EURASIA_TAG_STRIDE_THRESHOLD
                   ? EURASIA_TAG_STRIDE_ALIGN0 : EURASIA_TAG_STRIDE_ALIGN1;
                 devkind = (attrs.width*attrs.depth + 7) / 8;
                 pitch   = roundto(devkind, sgx_pitch_align * attrs.depth/8);
@@ -4031,7 +4031,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   enum { UNION, INTERSECT, SUBTRACT } setop;
 
                   /* Which shape to change? */
-                  kind = optarg[0] == 's' ? ShapeBounding 
+                  kind = optarg[0] == 's' ? ShapeBounding
                        : optarg[0] == 'c' ? ShapeClip
                        :                    ShapeInput;
                   optarg = (char *)p;
