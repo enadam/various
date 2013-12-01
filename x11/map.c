@@ -9,7 +9,7 @@
   then
     have_pkgconf="yes";
 
-    : Verify that requred $pkgs are installed.
+    : Verify that required $pkgs are installed.
     if ! pkg-config $pkgs;
     then
       echo "$pkgs are required" >&2;
@@ -1123,15 +1123,19 @@ static unsigned get_int_list(long *list, unsigned max, char const *str)
   if (!str)
     return 0;
 
-  for (i = 0; *str; i++)
+  i = 0;
+  for (;;)
     {
       if (i >= max)
         die("too many arguments\n");
+      else if (!*str)
+        break;
 
       if (*str == ',')
         {
           list++;
           str++;
+          i++;
         }
       else if (!(isdigit(*str) || *str == '-' || *str == '+' || isspace(*str)))
         {

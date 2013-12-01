@@ -3,22 +3,46 @@
   : are available.
   pkgs="x11";
   optional="xfixes xext xdamage xcomposite xtst xi xres xft";
-  for pkg in $optional;
-  do
-    : Leave xinput out if not building with xtst,
-    : because we would not use it.
-    [ "$pkg" = "xi" -a "$with_xtst" = "no" ] \
-      && continue;
 
-    define="$pkg";
-    eval with=\$with_$define;
-    [ "$with" = no ]  && continue;
-    pkg-config "$pkg" || continue;
+  : We can live without pkg-config if we must, but we will be very limited.
+  if pkg-config --version > /dev/null 2>&1;
+  then
+    have_pkgconf="yes";
 
-    pkgs="$pkgs $pkg";
-    defines="$defines $define";
-    eval with_$define="yes";
-  done
+    : Verify that required $pkgs are installed.
+    if ! pkg-config $pkgs;
+    then
+      echo "$pkgs are required" >&2;
+      exit 1;
+    fi
+
+    for pkg in $optional;
+    do
+      : Leave xinput out if not building with xtst,
+      : because we would not use it.
+      [ "$pkg" = "xi" -a "$with_xtst" = "no" ] \
+        && continue;
+
+      define="$pkg";
+      eval with=\$with_$define;
+      [ "$with" = no ]  && continue;
+      pkg-config "$pkg" || continue;
+
+      pkgs="$pkgs $pkg";
+      defines="$defines $define";
+      eval with_$define="yes";
+    done
+  else
+    if [ ! -d /usr/include/X11 ];
+    then
+      echo "libx11-dev is required" >&2;
+      exit 1;
+    fi
+
+    echo "Warning: pkg-config not found, cannot test for optional features" \
+      >&2;
+    have_pkgconf="no";
+  fi
 
   : These are safe to enable every time autodetected
   : because they do not depend on libraries.
@@ -34,6 +58,13 @@
     CFLAGS="$CFLAGS -I/usr/include/SGX/include4";
     CFLAGS="$CFLAGS -DHAVE_SGX";
   fi
+  if [ -f /targets/links/scratchbox.config ];
+  then
+    : Check for Fremantle.
+    source /targets/links/scratchbox.config;
+    [ "$SBOX_CROSS_GCC_NAME" = "cs2007q3-glibc2.5-arm7" ] \
+      && defines="$defines fremantle";
+  fi
 
   : We can take advantage of XRes 1.2, but unfortunately the package
   : version does not reflect the extension version in Harmattan.
@@ -41,7 +72,7 @@
     && grep -wq XResQueryClientIds /usr/include/X11/extensions/XRes.h \
     && defines="$defines xres_12";
 
-  : Probably if there is xi there is xi2 too, but who knows.
+  : Check for xi2.
   [ "$with_xi" = "yes" -a -f /usr/include/X11/extensions/XInput2.h ] \
     && defines="$defines xi2";
 
@@ -49,31 +80,34 @@
   lang="-x c";
 
   : Decide which toolkit to link with.  Prefer C, as it compiles faster.
-  [ "$with_qt" != "no" ] && pkg-config QtGui \
-    || with_qt="no";
-  [ "$with_gdk" != "no" ] && pkg-config gdk-2.0 \
-    || with_gdk="no";
-  [ "$with_gdk_pixbuf" != "no" ] && pkg-config gdk-pixbuf-2.0 \
-    || with_gdk_pixbuf="no";
-  if [ "$with_gdk" != "no" -a "$with_gdk_pixbuf" != "no" \
-    -a "$with_qt" != "yes" ];
+  if [ "$have_pkgconf" = "yes" ];
   then
-    pkgs="$pkgs gdk-2.0 gdk-pixbuf-2.0";
-    defines="$defines gdk gdk_pixbuf";
-  elif [ "$with_qt" != "no" ]
-  then
-    pkgs="$pkgs QtGui";
-    defines="$defines qt";
-    : ${CC:="c++"};
-    lang="-x c++";
-  elif [ "$with_gdk" != "no" ];
-  then
-    pkgs="$pkgs gdk-2.0";
-    defines="$defines gdk";
-  elif [ "$with_gdk_pixbuf" != "no" ];
-  then
-    pkgs="$pkgs gdk-pixbuf-2.0";
-    defines="$defines gdk_pixbuf";
+    [ "$with_qt" != "no" ] && pkg-config QtGui \
+      || with_qt="no";
+    [ "$with_gdk" != "no" ] && pkg-config gdk-2.0 \
+      || with_gdk="no";
+    [ "$with_gdk_pixbuf" != "no" ] && pkg-config gdk-pixbuf-2.0 \
+      || with_gdk_pixbuf="no";
+    if [ "$with_gdk" != "no" -a "$with_gdk_pixbuf" != "no" \
+      -a "$with_qt" != "yes" ];
+    then
+      pkgs="$pkgs gdk-2.0 gdk-pixbuf-2.0";
+      defines="$defines gdk gdk_pixbuf";
+    elif [ "$with_qt" != "no" ]
+    then
+      pkgs="$pkgs QtGui";
+      defines="$defines qt";
+      : ${CC:="c++"};
+      lang="-x c++";
+    elif [ "$with_gdk" != "no" ];
+    then
+      pkgs="$pkgs gdk-2.0";
+      defines="$defines gdk";
+    elif [ "$with_gdk_pixbuf" != "no" ];
+    then
+      pkgs="$pkgs gdk-pixbuf-2.0";
+      defines="$defines gdk_pixbuf";
+    fi
   fi
 
   : ${CC:="cc"};
@@ -106,8 +140,13 @@
   fi
 
   : We need sqrt to calculate Eucledian distances.
-  CFLAGS="$CFLAGS `pkg-config --cflags $pkgs`";
-  LIBS="`pkg-config --libs $pkgs` -lm";
+  if [ "$have_pkgconf" = "yes" ];
+  then
+    CFLAGS="$CFLAGS `pkg-config --cflags $pkgs`";
+    LIBS="-lm `pkg-config --libs $pkgs`";
+  else
+    LIBS="-lm -lX11";
+  fi
   echo "This program is free software.  It does whatever it wants.";
 
   : Build or simply echo the compilation command line.
@@ -534,7 +573,7 @@
  *        # eg. "+10+10", "+0.1+10+10", "+0.1-10+10"
  *
  * size   := "fs" | {<dim> 'x' <dim>}
- *        # "fs": fullscreen, ".5x.5": quarter of the screen, 
+ *        # "fs": fullscreen, ".5x.5": quarter of the screen,
  *        # "1.0x0.5-20": full-width and 20px shorter than half of the height,
  *        # "-20x-20": 20px shorter and narrower than the full screen
  * geo    := <size> [<pos>]
@@ -1125,15 +1164,19 @@ static unsigned get_int_list(long *list, unsigned max, char const *str)
   if (!str)
     return 0;
 
-  for (i = 0; *str; i++)
+  i = 0;
+  for (;;)
     {
       if (i >= max)
         die("too many arguments\n");
+      else if (!*str)
+        break;
 
       if (*str == ',')
         {
           list++;
           str++;
+          i++;
         }
       else if (!(isdigit(*str) || *str == '-' || *str == '+' || isspace(*str)))
         {
@@ -1355,7 +1398,7 @@ static char const *get_geometry(char const *str, XRectangle *geo)
       return str + 2;
     }
 
-  if (!(p1 = get_dims_or_coords(str, 
+  if (!(p1 = get_dims_or_coords(str,
                                 (short*)&geo->width, (short*)&geo->height,
                                 True, True, True)))
     die("invalid geometry\n");
@@ -1580,7 +1623,7 @@ static Bool find_client_window(Window *win, char const *name,
       XWindowAttributes attrs;
 
       /* Reject stupid 1x1 windows. */
-      ours = XGetWindowAttributes(Dpy, *win, &attrs) 
+      ours = XGetWindowAttributes(Dpy, *win, &attrs)
         && (attrs.width > 1 && attrs.height > 1);
       if (ours && wintype)
         { /* Match $wintype. */
@@ -2227,26 +2270,29 @@ static void print_info(Drawable win, Bool recursive, unsigned level)
 
 #ifdef HAVE_XRES
 # ifndef HAVE_XRES_12
-typedef struct
-{
-  XID client, mask;
-} XResClientIdSpec;
+typedef int XResNClients;
+typedef XResClient XResClientIdValue;
 
 typedef struct
 {
-  XResClientIdSpec spec;
-} XResClientIdValue;
+  XID client;
+  unsigned mask;
+} XResClientIdSpec;
 
 /* These calls are only available in XRes 1.2.  To keep things simple
  * and make it possible to use the new interface unconditionally,
  * emulate what we can with the old interface. */
 #  define XRES_CLIENT_ID_PID_MASK           0
 #  define XResGetClientPid(v)             (-1)
-#  define XResQueryClientIds(dpy, nspecs, specs, nclients, clients) \
-          XResQueryClients(dpy, (int*)nclients, (XResClient**)clients)
+#  define XResQueryClientIds(dpy, nspecs, specs, nclientsp, clients) \
+          XResQueryClients(dpy, nclientsp, clients)
 #  define XResClientIdsDestroy(nclients, clients)                   \
           XFree(clients)
-# endif /* ! HAVE_XRES_12 */
+#  define XRESCLIENT(client, i)           (clients)[i].resource_base
+# else /* HAVE_XRES_12 */
+typedef long XResNClients;
+#  define XRESCLIENT(client, i)           (clients)[i].spec.client
+# endif
 
 /* qsort() comparator to order a list of XResType:s by resource_type. */
 static int cmpxres(void const *lhs, void const *rhs)
@@ -2464,9 +2510,9 @@ whitelisted:
  * and print it out nicely formatted. */
 static void print_resources(Window win, enum resource_listing_t what)
 {
-  long nclients;
   int foo, nresources;
   XResType *resources;
+  XResNClients nclients;
   unsigned long spixmaps;
 
   nclients = 0;
@@ -2478,7 +2524,7 @@ static void print_resources(Window win, enum resource_listing_t what)
     }
   else
     {
-      long i;
+      XResNClients i;
       XResClientIdSpec spec;
       XResClientIdValue *clients;
 
@@ -2503,7 +2549,7 @@ static void print_resources(Window win, enum resource_listing_t what)
           int nitsres, plus;
           unsigned long itspixmaps;
 
-          client = clients[i].spec.client;
+          client = XRESCLIENT(clients, i);
 
           /* $itsres := this $client's resources */
           XResQueryClientPixmapBytes(Dpy, client, &itspixmaps);
@@ -2522,7 +2568,7 @@ static void print_resources(Window win, enum resource_listing_t what)
           if (what == EACH_CLIENT)
             { /* Client XID and the number of elements in $resources
                * pertaining to it. */
-              resources[nresources].resource_type = clients[i].spec.client;
+              resources[nresources].resource_type = XRESCLIENT(clients, i);
               resources[nresources].count = plus;
               nresources++;
 
@@ -2824,7 +2870,7 @@ static char const *determine_output_format(char const *fname)
 static void open_image(struct image_st *img, char const *fname,
                        unsigned width, unsigned height, Bool has_alpha)
 {
-  static int warned;
+  static __attribute__((unused)) int warned;
   char *tfname;
   memset(img, 0, sizeof(*img));
   img->has_alpha = has_alpha;
@@ -2986,7 +3032,7 @@ static void save_rgb_image(char const *fname, unsigned char const *in,
           before = p;
           for (px = o = 0; o < bpp; o += 8)
             px |= *p++ << o;
-          write_image(&out, 
+          write_image(&out,
                       mkrgb(mask_pixel(px, red),
                             mask_pixel(px, green),
                             mask_pixel(px, blue),
@@ -4429,7 +4475,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                  * comes from fbdev. */
                 get_win_attrs(win, &attrs, True, &visual);
                 fbbits = 5;
-                sgx_pitch_align = attrs.width < EURASIA_TAG_STRIDE_THRESHOLD 
+                sgx_pitch_align = attrs.width < EURASIA_TAG_STRIDE_THRESHOLD
                   ? EURASIA_TAG_STRIDE_ALIGN0 : EURASIA_TAG_STRIDE_ALIGN1;
                 devkind = (attrs.width*attrs.depth + 7) / 8;
                 pitch   = roundto(devkind, sgx_pitch_align * attrs.depth/8);
@@ -4641,7 +4687,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   enum { UNION, INTERSECT, SUBTRACT } setop;
 
                   /* Which shape to change? */
-                  kind = optarg[0] == 's' ? ShapeBounding 
+                  kind = optarg[0] == 's' ? ShapeBounding
                        : optarg[0] == 'c' ? ShapeClip
                        :                    ShapeInput;
                   optarg = (char *)p;
@@ -4868,6 +4914,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
               break;
             }
 
+#ifdef HAVE_FREMANTLE
           /* Control a hildon animation actor. */
           case 'A':
             {
@@ -4927,6 +4974,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                          SubstructureNotifyMask, &ev);
               break;
             }
+#endif /* HAVE_FREMANTLE */
 
           /* Change window attributes */
           case 'o':
