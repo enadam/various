@@ -54,9 +54,8 @@
   then
     : We only need some constants from the headers.
     defines="$defines sgx";
-    CFLAGS="$CFLAGS -I/usr/include/SGX/hwdefs -DHAVE_SGX";
+    CFLAGS="$CFLAGS -I/usr/include/SGX/hwdefs";
     CFLAGS="$CFLAGS -I/usr/include/SGX/include4";
-    CFLAGS="$CFLAGS -DHAVE_SGX";
   fi
   if [ -f /targets/links/scratchbox.config ];
   then
@@ -354,8 +353,12 @@
  * -c {swipe|swleft|swright|swup|swdown}
  *                      Swipe left/right/up/down.  Plainly "swipe" swipes
  *                      to the left.
- * -c qlb               Open the quick launchbar.
+ * -c qlb               Open the quick launchbar.  (Harmattan-specific)
  * -G fill=<geo>[<color>]
+ * -G dflt=<size>
+ *                      Make the default size <size>.
+ * -G dflt=<window>
+ *                      Make <window>'s size the default.
  * -G text=<X>x<Y>[<color>],<text>[,<font>]
  *                      Draw on the window (or pixmap or other drawable).
  * -X [u]app[{@none|<color>}]
@@ -398,7 +401,7 @@
  *
  * An <xpos> is a co-ordinate specification like 100x200.  You can use
  * the shorthands tl, bl, tr and br for the corners.  A co-ordinate
- * can be given relative to the screen size like 0.5x0.5.  This case
+ * can be given relative to the default size like 0.5x0.5.  This case
  * you can append an offset too: 0.5-10x0.5+10.  Co-ordinates and
  * offsets can be in pixels (default), milimeters, centimeters and
  * inches (though only pixels are reliable).  You can change the origin
@@ -407,12 +410,32 @@
  * The default origin is top-left and the gravity is always opposite
  * to the origin (ie. bottom-right by default).
  *
+ * Initially the default size is the size of the display.  When a new
+ * window is created, its size will become the default one.  It can also
+ * be set directly widh -G dflt or reset to size of the display.
+ *
  * A <geo> is like a geometry in standard X notation (WxH+X+Y), but more
  * flexible.  You can apply all the extensions described above with a few
  * differences: WxH does not accept an origin (since it's meaningless),
  * but does understand negative sizes (eg. -100x-100) meaning that many
- * pixels shorter.  You can use "fs" to designate full-screen size.
- * If +X+Y is omitted, the top-left origin is assumed.
+ * pixels shorter.  You can use "FS" to designate the entire display,
+ * or "fs" for the default size.  If +X+Y is omitted, the top-left origin
+ * is assumed.  Some intermediate level examples (DW/DH are the width/height
+ * of the default size):
+ *
+ * 50x0.5:                50x(DH/2)+0+0
+ * 50x0.5+100:            50x(DH/2+100)+0+0
+ * 50x0.5+100+200:        50x(DH/2)+100+200
+ * 50x0.5+100+150+200:    50x(DH/2+100)+150+200
+ * 50x0.5+100+0.5:        50x(DH/2)+100+(DH/2)
+ * 50x0.5+100+0.5+200:    50x(DH/2+100)+(DW/2)+200
+ *
+ * Some advanced examples:
+ * 100x100+1.0-50+1.0-50: 100x100+(DW-50)+(DH-50)
+ * 100x100+50+50br:       100x100+(DW-100-50)+(DH-100-50)
+ *                        (the bottom-right corner of the geo
+ *                         is +50+50 from the default area's
+ *                         bottom-right corner)
  *
  * <color>s are usually prefixed by '@' followed by a color name or direct
  * pixel value.  "random" as a color name will choose a random color.
@@ -554,7 +577,7 @@
  * off    := <integer>[<unit>]
  *        # offset in pixels
  * rel    := <non-zero float>
- *        # position or dimension relative to the full width/height
+ *        # position or dimension relative to the default width/height
  * dim    := <unsigned>[<unit>] | <negative>[<unit>] | {<rel>[<off>]}
  *        # relative/absolute dimension or dimension from full width/height
  *        # (equivalent to "1.0-<off>")
@@ -572,10 +595,10 @@
  * pos    := <corner> | {<coord> <coord> [<origin>]}
  *        # eg. "+10+10", "+0.1+10+10", "+0.1-10+10"
  *
- * size   := "fs" | {<dim> 'x' <dim>}
- *        # "fs": fullscreen, ".5x.5": quarter of the screen,
+ * size   := "FS" | "fs" | {<dim> 'x' <dim>}
+ *        # "FS": fullscreen, ".5x.5": quarter of the default size,
  *        # "1.0x0.5-20": full-width and 20px shorter than half of the height,
- *        # "-20x-20": 20px shorter and narrower than the full screen
+ *        # "-20x-20": 20px shorter and narrower than the default size
  * geo    := <size> [<pos>]
  *        # if <pos> is omitted, it's taken as +0+0
  *        # eg. ".5x.5+.25+.25": a centered square,
@@ -732,7 +755,9 @@ struct Zero { static int valueof(int idx) { return 0; } };
 #endif /* __cplusplus */
 
 /* Private constants */
-/* The list of recognized options for getopt(). */
+/* The list of recognized options for getopt().  Unavailable letters are:
+ * Aa Cc Dd E(e) Gg Ii Kk Ll Nn Qq Rr Ww Xx fmopsuvz.  Available letters:
+ * Bb F Hh Jj M O P S Tt U V Yy Z. */
 static char const *Optstring =
     "-vQqrz:n:N:g:lp:i:I:w:a:s:x:f:C:e:E:A:o:muR:L:dDKk:c:G:X:W:";
 
@@ -746,6 +771,14 @@ static int Scr;
 static Window Root;
 static Display *Dpy;
 static unsigned DpyWidth, DpyHeight;
+
+/*
+ * The size that get_dims_or_coords(), get_point() and get_geometry() will
+ * consider fullscreen.  the default is $DpyWidth x $DpyHeight.  It's set
+ * indirectly by -nN to the size of the new window, and directly with
+ * -G dflt=....
+ */
+static unsigned DfltWidth, DfltHeight;
 
 /* Atom value of UTF8_STRING. */
 static Atom Utf8;
@@ -903,46 +936,74 @@ static unsigned char untrap_xerrors(void)
   return Last_xerror;
 } /* untrap_xerrors */
 
-/* Return the primary output device's physical dimensions in milimeters. */
+/* Find out the primary output device's physical dimensions in milimeters.
+ * Returns whether the results are thought to be accurate. */
 static Bool get_dimensions(float *wmmp, float *hmmp)
 {
-#ifdef HAVE_OMAPFB
+#if defined(HAVE_FB) || defined(HAVE_OMAPFB)
   static int tried;
   static float wmm, hmm;
+  int hfb;
 
   /* Ask the kernel because X falsifies the information such that
-   * the DPI is some conventional value.. */
-  if (!tried)
+   * the DPI is some conventional value. */
+  if (!tried && (hfb = open("/dev/fb0", 0)) >= 0)
     {
-      int hfb;
+# ifdef HAVE_OMAPFB
       struct omapfb_display_info di;
 
-      if ((hfb = open("/dev/fb0", 0)) >= 0
-          && ioctl(hfb, OMAPFB_GET_DISPLAY_INFO, &di) == 0)
+      if (ioctl(hfb, OMAPFB_GET_DISPLAY_INFO, &di) == 0)
         { /* Convert from u-meters to milimeters. */
           wmm = di.width  / 1000.0;
           hmm = di.height / 1000.0;
           tried = True;
         }
-      else
-        { /* Fallback */
-          wmm = DisplayWidthMM(Dpy, Scr);
-          hmm = DisplayHeightMM(Dpy, Scr);
-          tried = -True;
-        }
-      close(hfb);
-    } /* Haven't tried to get the dimensions yet. */
+# endif /* HAVE_OMAPFB */
+# ifdef HAVE_FB
+      if (!tried)
+        {
+          struct fb_var_screeninfo fi;
 
+          /* Actually, I haven't seen this method working. */
+          memset(&fi, 0, sizeof(fi));
+          if (ioctl(hfb, FBIOGET_VSCREENINFO, &fi) == 0
+              && (int)fi.width > 0 && (int)fi.height > 0)
+            {
+              wmm = fi.width;
+              hmm = fi.height;
+              tried = True;
+            }
+        }
+# endif /* HAVE_FB */
+      close(hfb);
+    } /* Haven't $tried and /dev/fb is accessible. */
+
+  if (tried > 0)
+    {
+      if (wmmp)
+        *wmmp = wmm;
+      if (hmmp)
+        *hmmp = hmm;
+      return True;
+    }
+  else
+    tried = -True;
+#endif /* HAVE_FB || HAVE_OMAPFB */
+
+#ifdef HAVE_FREMANTLE
+  /* Fortunately we know the px/mm density. */
   if (wmmp)
-    *wmmp = wmm;
+    *wmmp = DpyWidth / 10.5;
   if (hmmp)
-    *hmmp = hmm;
-  return tried > 0;
+    *hmmp = DpyHeight / 10.5;
+  return True;
 #else /* Give in to the lies. */
-  *wmmp = DisplayWidthMM(Dpy, Scr);
-  *hmmp = DisplayHeightMM(Dpy, Scr);
+  if (wmmp)
+    *wmmp = DisplayWidthMM(Dpy, Scr);
+  if (hmmp)
+    *hmmp = DisplayHeightMM(Dpy, Scr);
   return False;
-#endif /* HAVE_OMAPFB */
+#endif /* ! HAVE_FREMANTLE */
 } /* get_dimensions */
 
 /* If $p points at a known length suffix returns how much to scale
@@ -1080,7 +1141,7 @@ static char const *get_key_val(Atom *akey, char const *in)
   char *key;
   size_t lkey;
 
-  /* Find the end of the KEY. */
+  /* Find the end of the $key. */
   for (lkey = 0; in[lkey] != '='; lkey++)
     if (in[lkey] == '\0')
       { /* There's no VALUE. */
@@ -1256,7 +1317,7 @@ static char const *get_dims_or_coords(char const *p,
     return NULL;
   if (rel)
     {
-      *xp = DpyWidth * rel;
+      *xp = DfltWidth * rel;
       if (!xpos || *p != 'x')
         {
           /*
@@ -1294,7 +1355,7 @@ static char const *get_dims_or_coords(char const *p,
       p = scale2px(p, xp, True);
       if (isdim && *xp < 0)
         /* Count from the other edge. */
-        *xp += DpyWidth;
+        *xp += DfltWidth;
     }
 
   /* Second component. */
@@ -1306,7 +1367,7 @@ static char const *get_dims_or_coords(char const *p,
   if (rel)
     {
 have_y_rel:
-      *yp = DpyHeight * rel;
+      *yp = DfltHeight * rel;
       if (y_rel_off)
         { /* Is it followed by an offset? */
           short off;
@@ -1326,7 +1387,7 @@ have_y_rel:
       p = scale2px(p, yp, False);
       if (isdim && *yp < 0)
         /* Count from the other edge. */
-        *yp += DpyHeight;
+        *yp += DfltHeight;
     }
 
   /* Don't return negative dimensions. */
@@ -1368,13 +1429,13 @@ static char const *get_point(char const *p, short *xp, short *yp,
   if (originp)
     *originp = origin;
   if (origin[1] == 'c')
-    *xp += DpyWidth / 2;
+    *xp += DfltWidth / 2;
   else if (origin[1] == 'r')
-    *xp = DpyWidth  - *xp;
+    *xp = DfltWidth  - *xp;
   if (origin[0] == 'c')
-    *yp = DpyHeight / 2;
+    *yp = DfltHeight / 2;
   else if (origin[0] == 'b')
-    *yp = DpyHeight - *yp;
+    *yp = DfltHeight - *yp;
 
   return origin+2;
 } /* get_point */
@@ -1385,16 +1446,23 @@ static char const *get_xpos(char const *p, XPoint *xpos)
   return get_point(p, &xpos->x, &xpos->y, NULL, True);
 } /* get_xpos */
 
-/* Get a <geo>. */
+/* Get a <geo>.  See the user documentation for examples. */
 static char const *get_geometry(char const *str, XRectangle *geo)
 {
   char const *p1, *pp, *origin;
 
-  if (str[0] == 'f' && str[1] == 's')
-    { /* Fullscreen */
+  if (str[0] == 'F' && str[1] == 'S')
+    { /* Entire display. */
       geo->x = geo->y = 0;
       geo->width  = DpyWidth;
       geo->height = DpyHeight;
+      return str + 2;
+    }
+  else if (str[0] == 'f' && str[1] == 's')
+    { /* Default size ($DfltWidth x $DfltHeight) */
+      geo->x = geo->y = 0;
+      geo->width  = DfltWidth;
+      geo->height = DfltHeight;
       return str + 2;
     }
 
@@ -1403,7 +1471,7 @@ static char const *get_geometry(char const *str, XRectangle *geo)
                                 True, True, True)))
     die("invalid geometry\n");
   if (!(pp = get_point(p1, &geo->x, &geo->y, &origin, False)))
-    { /* Recognize {<dim>x<rel>}{<off><coord>}. */
+    { /* Recognize {<dim>x<rel>}{<off><coord>} (eg. 100x0.5+10+0.5). */
       short w2, h2;
       if ((pp = get_dims_or_coords(str, &w2, &h2, True, False, True)) != NULL
           && (pp = get_point(pp, &geo->x, &geo->y, &origin, False)) != NULL)
@@ -4657,6 +4725,10 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
               if (Verbose)
                 printf("New window: 0x%lx\n", Newborn);
 
+              /* Inherit the default size. */
+              DfltWidth = geo.width;
+              DfltHeight = geo.height;
+
               /* Give a default unique name to the window. */
               snprintf(name, sizeof(name), "map_%u_%d", NWindows++, getpid());
               XStoreName(Dpy, Newborn, name);
@@ -5136,7 +5208,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
               else
                 { /* $optarg is the desired sibling. */
                   config.stack_mode = optchar == 'R' ? Above : Below;
-                  if (!(config.sibling  = choose_window(optarg)))
+                  if (!(config.sibling = choose_window(optarg)))
                     break;
                 }
 
@@ -5440,133 +5512,157 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
 
               gc = None;
               valmask = 0;
-              if ((cmd = isprefix(optarg, "fill=")) != NULL)
-                {   /* Draw a filled rectangle. */
-                    XRectangle rect;
+              if ((cmd = isprefix(optarg, "dflt=")) != NULL)
+                {   /* Set the default size. */
+                  short w, h;
+                  char const *p;
 
-                    /* rect=<geo>[<color>] */
-                    cmd = get_geometry(cmd, &rect);
-                    if (strspn(cmd, "@%#"))
-                      {
-                        XWindowAttributes attrs;
+                  if (!isprefix(cmd, "0x")
+                      && (p = get_dims_or_coords(cmd, &w, &h,
+                                                 True, True, True)) != NULL)
+                    { /* dflt=<size> */
+                      cmd = p;
+                      DfltWidth = w;
+                      DfltHeight = h;
+                    }
+                  else
+                    { /* Take the size of $sample. */
+                      Window sample;
+                      XWindowAttributes attrs;
 
-                        get_win_attrs(win, &attrs, False, NULL);
-                        cmd = get_color_pixel(attrs.colormap, cmd,
-                                              &gcvals.foreground);
-                        valmask |= GCForeground;
-                      }
+                      sample = must_choose_window(cmd);
+                      get_win_attrs(sample, &attrs, True, NULL);
+                      DfltWidth = attrs.width;
+                      DfltHeight = attrs.height;
+                      break;
+                    }
+                }
+              else if ((cmd = isprefix(optarg, "fill=")) != NULL)
+                { /* Draw a filled rectangle. */
+                  XRectangle rect;
 
-                    gc = XCreateGC(Dpy, win, valmask, &gcvals);
-                    XFillRectangle(Dpy, win, gc,
-                                   rect.x, rect.y, rect.width, rect.height);
+                  /* rect=<geo>[<color>] */
+                  cmd = get_geometry(cmd, &rect);
+                  if (strspn(cmd, "@%#"))
+                    {
+                      XWindowAttributes attrs;
+
+                      get_win_attrs(win, &attrs, False, NULL);
+                      cmd = get_color_pixel(attrs.colormap, cmd,
+                                            &gcvals.foreground);
+                      valmask |= GCForeground;
+                    }
+
+                  gc = XCreateGC(Dpy, win, valmask, &gcvals);
+                  XFillRectangle(Dpy, win, gc,
+                                 rect.x, rect.y, rect.width, rect.height);
                 }
               else if ((cmd = isprefix(optarg, "text=")) != NULL)
-                {   /* Draw text. */
-                    /* text=<x>x<y>[@<color>],<msg>[,<font>] */
+                { /* Draw text. */
+                  /* text=<x>x<y>[@<color>],<msg>[,<font>] */
 #ifndef HAVE_XFT /* Use good old XDrawText(). */
-                    XPoint p;
-                    XTextItem text;
+                  XPoint p;
+                  XTextItem text;
 
-                    /* Position */
-                    if (!(cmd = get_xpos(cmd, &p)))
-                      die("invalid coordinates\n");
+                  /* Position */
+                  if (!(cmd = get_xpos(cmd, &p)))
+                    die("invalid coordinates\n");
 
-                    /* Color */
-                    if (strspn(cmd, "@%#"))
-                      {
-                        XWindowAttributes attrs;
+                  /* Color */
+                  if (strspn(cmd, "@%#"))
+                    {
+                      XWindowAttributes attrs;
 
-                        get_win_attrs(win, &attrs, False, NULL);
-                        cmd = get_color_pixel(attrs.colormap, cmd,
-                                              &gcvals.background);
-                        valmask |= GCBackground;
-                      }
+                      get_win_attrs(win, &attrs, False, NULL);
+                      cmd = get_color_pixel(attrs.colormap, cmd,
+                                            &gcvals.background);
+                      valmask |= GCBackground;
+                    }
 
-                    /* Text */
-                    if (*cmd++ != ',')
-                      die("where is the text?\n");
-                    if (!(cmd = get_optarg(cmd,
-                                           (char const **)&text.chars,
-                                           (size_t *)&text.nchars)))
-                      die("text expected\n");
+                  /* Text */
+                  if (*cmd++ != ',')
+                    die("where is the text?\n");
+                  if (!(cmd = get_optarg(cmd,
+                                         (char const **)&text.chars,
+                                         (size_t *)&text.nchars)))
+                    die("text expected\n");
 
-                    /* Font */
-                    if (*cmd)
-                      {
-                        char const *font;
+                  /* Font */
+                  if (*cmd)
+                    {
+                      char const *font;
 
-                        if (!(cmd = get_optarg(cmd, &font, NULL)))
-                          die("font expected\n");
-                        if ((text.font = XLoadFont(Dpy, font)) == None)
-                          die("font not found\n");
-                      }
-                    else
-                      text.font = None;
+                      if (!(cmd = get_optarg(cmd, &font, NULL)))
+                        die("font expected\n");
+                      if ((text.font = XLoadFont(Dpy, font)) == None)
+                        die("font not found\n");
+                    }
+                  else
+                    text.font = None;
 
-                    /* Draw */
-                    text.delta = 0;
-                    gc = XCreateGC(Dpy, win, valmask, &gcvals);
-                    XDrawText(Dpy, win, gc, p.x, p.y, &text, 1);
+                  /* Draw */
+                  text.delta = 0;
+                  gc = XCreateGC(Dpy, win, valmask, &gcvals);
+                  XDrawText(Dpy, win, gc, p.x, p.y, &text, 1);
 #else /* HAVE_XFT */
-                    XPoint p;
-                    XftDraw *xft;
-                    XftFont *font;
-                    XftColor color;
-                    size_t ltext;
-                    char const *text;
-                    XWindowAttributes attrs;
+                  XPoint p;
+                  XftDraw *xft;
+                  XftFont *font;
+                  XftColor color;
+                  size_t ltext;
+                  char const *text;
+                  XWindowAttributes attrs;
 
-                    get_win_attrs(win, &attrs, False, NULL);
-                    assert(xft = XftDrawCreate(Dpy, win,
-                                         attrs.visual, attrs.colormap));
+                  get_win_attrs(win, &attrs, False, NULL);
+                  assert(xft = XftDrawCreate(Dpy, win,
+                                       attrs.visual, attrs.colormap));
 
-                    /* Position */
-                    if (!(cmd = get_xpos(cmd, &p)))
-                      die("invalid coordinates\n");
+                  /* Position */
+                  if (!(cmd = get_xpos(cmd, &p)))
+                    die("invalid coordinates\n");
 
-                    /* Color */
-                    if (strspn(cmd, "@%#"))
-                      {
-                        XColor xcolor;
+                  /* Color */
+                  if (strspn(cmd, "@%#"))
+                    {
+                      XColor xcolor;
 
-                        cmd = get_xcolor(attrs.colormap, cmd, &xcolor);
-                        color.pixel       = xcolor.pixel;
-                        color.color.red   = xcolor.red;
-                        color.color.green = xcolor.green;
-                        color.color.blue  = xcolor.blue;
-                        color.color.alpha = (color.pixel>>24) * 0x0101;
-                      }
-                    else
-                      { /* Be black */
-                        memset(&color, 0, sizeof(color));
-                        color.color.alpha = 0xFFFF;
-                      }
+                      cmd = get_xcolor(attrs.colormap, cmd, &xcolor);
+                      color.pixel       = xcolor.pixel;
+                      color.color.red   = xcolor.red;
+                      color.color.green = xcolor.green;
+                      color.color.blue  = xcolor.blue;
+                      color.color.alpha = (color.pixel>>24) * 0x0101;
+                    }
+                  else
+                    { /* Be black */
+                      memset(&color, 0, sizeof(color));
+                      color.color.alpha = 0xFFFF;
+                    }
 
-                    /* Text */
-                    if (*cmd++ != ',')
-                      die("where is the text?\n");
-                    if (!(cmd = get_optarg(cmd, &text, &ltext)))
-                      die("text expected\n");
+                  /* Text */
+                  if (*cmd++ != ',')
+                    die("where is the text?\n");
+                  if (!(cmd = get_optarg(cmd, &text, &ltext)))
+                    die("text expected\n");
 
-                    /* Font */
-                    if (*cmd)
-                      {
-                        char const *name;
+                  /* Font */
+                  if (*cmd)
+                    {
+                      char const *name;
 
-                        if (!(cmd = get_optarg(cmd, &name, NULL)))
-                          die("font expected\n");
-                        if (!(font = XftFontOpenName(Dpy, Scr, name)))
-                          die("font not found\n");
-                      }
-                    else
-                        assert(font = XftFontOpenName(Dpy, Scr,
-                                                      "default"));
+                      if (!(cmd = get_optarg(cmd, &name, NULL)))
+                        die("font expected\n");
+                      if (!(font = XftFontOpenName(Dpy, Scr, name)))
+                        die("font not found\n");
+                    }
+                  else
+                    assert(font = XftFontOpenName(Dpy, Scr, "default"));
 
-                    /* Draw */
-                    XftDrawString8(xft, &color, font, p.x, p.y,
-                                   (FcChar8 const *)text, ltext);
-                    XftFontClose(Dpy, font);
-                    XftDrawDestroy(xft);
+                  /* Draw */
+                  XftDrawString8(xft, &color, font, p.x, p.y,
+                                 (FcChar8 const *)text, ltext);
+                  XftFontClose(Dpy, font);
+                  XftDrawDestroy(xft);
 #endif /* HAVE_XFT */
                 } /* if */
               else
@@ -5921,8 +6017,8 @@ int main(int argc, char const *const *argv)
 
   Scr = DefaultScreen(Dpy);
   Root = DefaultRootWindow(Dpy);
-  DpyWidth = DisplayWidth(Dpy, Scr);
-  DpyHeight = DisplayHeight(Dpy, Scr);
+  DpyWidth = DfltWidth = DisplayWidth(Dpy, Scr);
+  DpyHeight = DfltHeight = DisplayHeight(Dpy, Scr);
   Utf8 = XInternAtom(Dpy, "UTF8_STRING", False);
   /* }}} */
 
