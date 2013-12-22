@@ -54,9 +54,8 @@
   then
     : We only need some constants from the headers.
     defines="$defines sgx";
-    CFLAGS="$CFLAGS -I/usr/include/SGX/hwdefs -DHAVE_SGX";
+    CFLAGS="$CFLAGS -I/usr/include/SGX/hwdefs";
     CFLAGS="$CFLAGS -I/usr/include/SGX/include4";
-    CFLAGS="$CFLAGS -DHAVE_SGX";
   fi
   if [ -f /targets/links/scratchbox.config ];
   then
