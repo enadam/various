@@ -48,7 +48,8 @@ do_ffmpeg()
 
 	tmpfile=`mktemp masstag-XXXXXX-$fname`;
 	if $testing ffmpeg -loglevel error \
-		-i "$fname" -c:v copy -c:a copy "$@" -y "$tmpfile";
+		-i "$fname" -c:v copy -c:a copy "$@" -y "$tmpfile" \
+		< /dev/null;
 	then
 		$testing mv -f "$tmpfile" "$fname";
 		[ "$testing" = "" ] || rm "$tmpfile";
