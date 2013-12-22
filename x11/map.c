@@ -4809,132 +4809,131 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
               gc = None;
               valmask = 0;
               if ((cmd = isprefix(optarg, "fill=")) != NULL)
-                {   /* Draw a filled rectangle. */
-                    XRectangle rect;
+                { /* Draw a filled rectangle. */
+                  XRectangle rect;
 
-                    /* rect=<geo>[<color>] */
-                    cmd = get_geometry(cmd, &rect);
-                    if (strspn(cmd, "@%#"))
-                      {
-                        XWindowAttributes attrs;
+                  /* rect=<geo>[<color>] */
+                  cmd = get_geometry(cmd, &rect);
+                  if (strspn(cmd, "@%#"))
+                    {
+                      XWindowAttributes attrs;
 
-                        get_win_attrs(win, &attrs, False, NULL);
-                        cmd = get_color_pixel(attrs.colormap, cmd,
-                                              &gcvals.foreground);
-                        valmask |= GCForeground;
-                      }
+                      get_win_attrs(win, &attrs, False, NULL);
+                      cmd = get_color_pixel(attrs.colormap, cmd,
+                                            &gcvals.foreground);
+                      valmask |= GCForeground;
+                    }
 
-                    gc = XCreateGC(Dpy, win, valmask, &gcvals);
-                    XFillRectangle(Dpy, win, gc,
-                                   rect.x, rect.y, rect.width, rect.height);
+                  gc = XCreateGC(Dpy, win, valmask, &gcvals);
+                  XFillRectangle(Dpy, win, gc,
+                                 rect.x, rect.y, rect.width, rect.height);
                 }
               else if ((cmd = isprefix(optarg, "text=")) != NULL)
-                {   /* Draw text. */
-                    /* text=<x>x<y>[@<color>],<msg>[,<font>] */
+                { /* Draw text. */
+                  /* text=<x>x<y>[@<color>],<msg>[,<font>] */
 #ifndef HAVE_XFT /* Use good old XDrawText(). */
-                    XPoint p;
-                    XTextItem text;
+                  XPoint p;
+                  XTextItem text;
 
-                    /* Position */
-                    if (!(cmd = get_xpos(cmd, &p)))
-                      die("invalid coordinates\n");
+                  /* Position */
+                  if (!(cmd = get_xpos(cmd, &p)))
+                    die("invalid coordinates\n");
 
-                    /* Color */
-                    if (strspn(cmd, "@%#"))
-                      {
-                        XWindowAttributes attrs;
+                  /* Color */
+                  if (strspn(cmd, "@%#"))
+                    {
+                      XWindowAttributes attrs;
 
-                        get_win_attrs(win, &attrs, False, NULL);
-                        cmd = get_color_pixel(attrs.colormap, cmd,
-                                              &gcvals.background);
-                        valmask |= GCBackground;
-                      }
+                      get_win_attrs(win, &attrs, False, NULL);
+                      cmd = get_color_pixel(attrs.colormap, cmd,
+                                            &gcvals.background);
+                      valmask |= GCBackground;
+                    }
 
-                    /* Text */
-                    if (*cmd++ != ',')
-                      die("where is the text?\n");
-                    if (!(cmd = get_optarg(cmd,
-                                           (char const **)&text.chars,
-                                           (size_t *)&text.nchars)))
-                      die("text expected\n");
+                  /* Text */
+                  if (*cmd++ != ',')
+                    die("where is the text?\n");
+                  if (!(cmd = get_optarg(cmd,
+                                         (char const **)&text.chars,
+                                         (size_t *)&text.nchars)))
+                    die("text expected\n");
 
-                    /* Font */
-                    if (*cmd)
-                      {
-                        char const *font;
+                  /* Font */
+                  if (*cmd)
+                    {
+                      char const *font;
 
-                        if (!(cmd = get_optarg(cmd, &font, NULL)))
-                          die("font expected\n");
-                        if ((text.font = XLoadFont(Dpy, font)) == None)
-                          die("font not found\n");
-                      }
-                    else
-                      text.font = None;
+                      if (!(cmd = get_optarg(cmd, &font, NULL)))
+                        die("font expected\n");
+                      if ((text.font = XLoadFont(Dpy, font)) == None)
+                        die("font not found\n");
+                    }
+                  else
+                    text.font = None;
 
-                    /* Draw */
-                    text.delta = 0;
-                    gc = XCreateGC(Dpy, win, valmask, &gcvals);
-                    XDrawText(Dpy, win, gc, p.x, p.y, &text, 1);
+                  /* Draw */
+                  text.delta = 0;
+                  gc = XCreateGC(Dpy, win, valmask, &gcvals);
+                  XDrawText(Dpy, win, gc, p.x, p.y, &text, 1);
 #else /* HAVE_XFT */
-                    XPoint p;
-                    XftDraw *xft;
-                    XftFont *font;
-                    XftColor color;
-                    size_t ltext;
-                    char const *text;
-                    XWindowAttributes attrs;
+                  XPoint p;
+                  XftDraw *xft;
+                  XftFont *font;
+                  XftColor color;
+                  size_t ltext;
+                  char const *text;
+                  XWindowAttributes attrs;
 
-                    get_win_attrs(win, &attrs, False, NULL);
-                    assert(xft = XftDrawCreate(Dpy, win,
-                                         attrs.visual, attrs.colormap));
+                  get_win_attrs(win, &attrs, False, NULL);
+                  assert(xft = XftDrawCreate(Dpy, win,
+                                       attrs.visual, attrs.colormap));
 
-                    /* Position */
-                    if (!(cmd = get_xpos(cmd, &p)))
-                      die("invalid coordinates\n");
+                  /* Position */
+                  if (!(cmd = get_xpos(cmd, &p)))
+                    die("invalid coordinates\n");
 
-                    /* Color */
-                    if (strspn(cmd, "@%#"))
-                      {
-                        XColor xcolor;
+                  /* Color */
+                  if (strspn(cmd, "@%#"))
+                    {
+                      XColor xcolor;
 
-                        cmd = get_xcolor(attrs.colormap, cmd, &xcolor);
-                        color.pixel       = xcolor.pixel;
-                        color.color.red   = xcolor.red;
-                        color.color.green = xcolor.green;
-                        color.color.blue  = xcolor.blue;
-                        color.color.alpha = (color.pixel>>24) * 0x0101;
-                      }
-                    else
-                      { /* Be black */
-                        memset(&color, 0, sizeof(color));
-                        color.color.alpha = 0xFFFF;
-                      }
+                      cmd = get_xcolor(attrs.colormap, cmd, &xcolor);
+                      color.pixel       = xcolor.pixel;
+                      color.color.red   = xcolor.red;
+                      color.color.green = xcolor.green;
+                      color.color.blue  = xcolor.blue;
+                      color.color.alpha = (color.pixel>>24) * 0x0101;
+                    }
+                  else
+                    { /* Be black */
+                      memset(&color, 0, sizeof(color));
+                      color.color.alpha = 0xFFFF;
+                    }
 
-                    /* Text */
-                    if (*cmd++ != ',')
-                      die("where is the text?\n");
-                    if (!(cmd = get_optarg(cmd, &text, &ltext)))
-                      die("text expected\n");
+                  /* Text */
+                  if (*cmd++ != ',')
+                    die("where is the text?\n");
+                  if (!(cmd = get_optarg(cmd, &text, &ltext)))
+                    die("text expected\n");
 
-                    /* Font */
-                    if (*cmd)
-                      {
-                        char const *name;
+                  /* Font */
+                  if (*cmd)
+                    {
+                      char const *name;
 
-                        if (!(cmd = get_optarg(cmd, &name, NULL)))
-                          die("font expected\n");
-                        if (!(font = XftFontOpenName(Dpy, Scr, name)))
-                          die("font not found\n");
-                      }
-                    else
-                        assert(font = XftFontOpenName(Dpy, Scr,
-                                                      "default"));
+                      if (!(cmd = get_optarg(cmd, &name, NULL)))
+                        die("font expected\n");
+                      if (!(font = XftFontOpenName(Dpy, Scr, name)))
+                        die("font not found\n");
+                    }
+                  else
+                    assert(font = XftFontOpenName(Dpy, Scr, "default"));
 
-                    /* Draw */
-                    XftDrawString8(xft, &color, font, p.x, p.y,
-                                   (FcChar8 const *)text, ltext);
-                    XftFontClose(Dpy, font);
-                    XftDrawDestroy(xft);
+                  /* Draw */
+                  XftDrawString8(xft, &color, font, p.x, p.y,
+                                 (FcChar8 const *)text, ltext);
+                  XftFontClose(Dpy, font);
+                  XftDrawDestroy(xft);
 #endif /* HAVE_XFT */
                 } /* if */
               else
