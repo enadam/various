@@ -690,7 +690,9 @@ enum resource_listing_t
 };
 
 /* Private constants */
-/* The list of recognized options for getopt(). */
+/* The list of recognized options for getopt().  Unavailable letters are:
+ * Aa Cc Dd E(e) Gg Ii Kk Ll Nn Qq Rr Ww Xx fmopsuvz.  Available letters:
+ * Bb F Hh Jj M O P S Tt U V Yy Z. */
 static char const *Optstring =
     "-vQqrz:n:N:g:lp:i:I:w:a:s:x:f:C:E:A:o:muR:L:dDKk:c:G:X:W:";
 
@@ -861,7 +863,8 @@ static unsigned char untrap_xerrors(void)
   return Last_xerror;
 } /* untrap_xerrors */
 
-/* Return the primary output device's physical dimensions in milimeters. */
+/* Find out the primary output device's physical dimensions in milimeters.
+ * Returns whether the results are thought to be accurate. */
 static Bool get_dimensions(float *wmmp, float *hmmp)
 {
 #ifdef HAVE_OMAPFB
@@ -1038,7 +1041,7 @@ static char const *get_key_val(Atom *akey, char const *in)
   char *key;
   size_t lkey;
 
-  /* Find the end of the KEY. */
+  /* Find the end of the $key. */
   for (lkey = 0; in[lkey] != '='; lkey++)
     if (in[lkey] == '\0')
       { /* There's no VALUE. */
@@ -1343,7 +1346,7 @@ static char const *get_xpos(char const *p, XPoint *xpos)
   return get_point(p, &xpos->x, &xpos->y, NULL, True);
 } /* get_xpos */
 
-/* Get a <geo>. */
+/* Get a <geo>.  See the user documentation for examples. */
 static char const *get_geometry(char const *str, XRectangle *geo)
 {
   char const *p1, *pp, *origin;
@@ -1361,7 +1364,7 @@ static char const *get_geometry(char const *str, XRectangle *geo)
                                 True, True, True)))
     die("invalid geometry\n");
   if (!(pp = get_point(p1, &geo->x, &geo->y, &origin, False)))
-    { /* Recognize {<dim>x<rel>}{<off><coord>}. */
+    { /* Recognize {<dim>x<rel>}{<off><coord>} (eg. 100x0.5+10+0.5). */
       short w2, h2;
       if ((pp = get_dims_or_coords(str, &w2, &h2, True, False, True)) != NULL
           && (pp = get_point(pp, &geo->x, &geo->y, &origin, False)) != NULL)
