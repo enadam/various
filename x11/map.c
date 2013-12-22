@@ -342,8 +342,12 @@
  * -c {swipe|swleft|swright|swup|swdown}
  *                      Swipe left/right/up/down.  Plainly "swipe" swipes
  *                      to the left.
- * -c qlb               Open the quick launchbar.
+ * -c qlb               Open the quick launchbar.  (Harmattan-specific)
  * -G fill=<geo>[<color>]
+ * -G dflt=<size>
+ *                      Make the default size <size>.
+ * -G dflt=<window>
+ *                      Make <window>'s size the default.
  * -G text=<X>x<Y>[<color>],<text>[,<font>]
  *                      Draw on the window (or pixmap or other drawable).
  * -X [u]app[{@none|<color>}]
@@ -386,7 +390,7 @@
  *
  * An <xpos> is a co-ordinate specification like 100x200.  You can use
  * the shorthands tl, bl, tr and br for the corners.  A co-ordinate
- * can be given relative to the screen size like 0.5x0.5.  This case
+ * can be given relative to the default size like 0.5x0.5.  This case
  * you can append an offset too: 0.5-10x0.5+10.  Co-ordinates and
  * offsets can be in pixels (default), milimeters, centimeters and
  * inches (though only pixels are reliable).  You can change the origin
@@ -395,12 +399,32 @@
  * The default origin is top-left and the gravity is always opposite
  * to the origin (ie. bottom-right by default).
  *
+ * Initially the default size is the size of the display.  When a new
+ * window is created, its size will become the default one.  It can also
+ * be set directly widh -G dflt or reset to size of the display.
+ *
  * A <geo> is like a geometry in standard X notation (WxH+X+Y), but more
  * flexible.  You can apply all the extensions described above with a few
  * differences: WxH does not accept an origin (since it's meaningless),
  * but does understand negative sizes (eg. -100x-100) meaning that many
- * pixels shorter.  You can use "fs" to designate full-screen size.
- * If +X+Y is omitted, the top-left origin is assumed.
+ * pixels shorter.  You can use "FS" to designate the entire display,
+ * or "fs" for the default size.  If +X+Y is omitted, the top-left origin
+ * is assumed.  Some intermediate level examples (DW/DH are the width/height
+ * of the default size):
+ *
+ * 50x0.5:                50x(DH/2)+0+0
+ * 50x0.5+100:            50x(DH/2+100)+0+0
+ * 50x0.5+100+200:        50x(DH/2)+100+200
+ * 50x0.5+100+150+200:    50x(DH/2+100)+150+200
+ * 50x0.5+100+0.5:        50x(DH/2)+100+(DH/2)
+ * 50x0.5+100+0.5+200:    50x(DH/2+100)+(DW/2)+200
+ *
+ * Some advanced examples:
+ * 100x100+1.0-50+1.0-50: 100x100+(DW-50)+(DH-50)
+ * 100x100+50+50br:       100x100+(DW-100-50)+(DH-100-50)
+ *                        (the bottom-right corner of the geo
+ *                         is +50+50 from the default area's
+ *                         bottom-right corner)
  *
  * <color>s are usually prefixed by '@' followed by a color name or direct
  * pixel value.  "random" as a color name will choose a random color.
@@ -542,7 +566,7 @@
  * off    := <integer>[<unit>]
  *        # offset in pixels
  * rel    := <non-zero float>
- *        # position or dimension relative to the full width/height
+ *        # position or dimension relative to the default width/height
  * dim    := <unsigned>[<unit>] | <negative>[<unit>] | {<rel>[<off>]}
  *        # relative/absolute dimension or dimension from full width/height
  *        # (equivalent to "1.0-<off>")
@@ -560,10 +584,10 @@
  * pos    := <corner> | {<coord> <coord> [<origin>]}
  *        # eg. "+10+10", "+0.1+10+10", "+0.1-10+10"
  *
- * size   := "fs" | {<dim> 'x' <dim>}
- *        # "fs": fullscreen, ".5x.5": quarter of the screen,
+ * size   := "FS" | "fs" | {<dim> 'x' <dim>}
+ *        # "FS": fullscreen, ".5x.5": quarter of the default size,
  *        # "1.0x0.5-20": full-width and 20px shorter than half of the height,
- *        # "-20x-20": 20px shorter and narrower than the full screen
+ *        # "-20x-20": 20px shorter and narrower than the default size
  * geo    := <size> [<pos>]
  *        # if <pos> is omitted, it's taken as +0+0
  *        # eg. ".5x.5+.25+.25": a centered square,
@@ -706,6 +730,14 @@ static int Scr;
 static Window Root;
 static Display *Dpy;
 static unsigned DpyWidth, DpyHeight;
+
+/*
+ * The size that get_dims_or_coords(), get_point() and get_geometry() will
+ * consider fullscreen.  the default is $DpyWidth x $DpyHeight.  It's set
+ * indirectly by -nN to the size of the new window, and directly with
+ * -G dflt=....
+ */
+static unsigned DfltWidth, DfltHeight;
 
 /* Atom value of UTF8_STRING. */
 static Atom Utf8;
@@ -1244,7 +1276,7 @@ static char const *get_dims_or_coords(char const *p,
     return NULL;
   if (rel)
     {
-      *xp = DpyWidth * rel;
+      *xp = DfltWidth * rel;
       if (!xpos || *p != 'x')
         {
           /*
@@ -1282,7 +1314,7 @@ static char const *get_dims_or_coords(char const *p,
       p = scale2px(p, xp, True);
       if (isdim && *xp < 0)
         /* Count from the other edge. */
-        *xp += DpyWidth;
+        *xp += DfltWidth;
     }
 
   /* Second component. */
@@ -1294,7 +1326,7 @@ static char const *get_dims_or_coords(char const *p,
   if (rel)
     {
 have_y_rel:
-      *yp = DpyHeight * rel;
+      *yp = DfltHeight * rel;
       if (y_rel_off)
         { /* Is it followed by an offset? */
           short off;
@@ -1314,7 +1346,7 @@ have_y_rel:
       p = scale2px(p, yp, False);
       if (isdim && *yp < 0)
         /* Count from the other edge. */
-        *yp += DpyHeight;
+        *yp += DfltHeight;
     }
 
   /* Don't return negative dimensions. */
@@ -1356,13 +1388,13 @@ static char const *get_point(char const *p, short *xp, short *yp,
   if (originp)
     *originp = origin;
   if (origin[1] == 'c')
-    *xp += DpyWidth / 2;
+    *xp += DfltWidth / 2;
   else if (origin[1] == 'r')
-    *xp = DpyWidth  - *xp;
+    *xp = DfltWidth  - *xp;
   if (origin[0] == 'c')
-    *yp = DpyHeight / 2;
+    *yp = DfltHeight / 2;
   else if (origin[0] == 'b')
-    *yp = DpyHeight - *yp;
+    *yp = DfltHeight - *yp;
 
   return origin+2;
 } /* get_point */
@@ -1378,11 +1410,18 @@ static char const *get_geometry(char const *str, XRectangle *geo)
 {
   char const *p1, *pp, *origin;
 
-  if (str[0] == 'f' && str[1] == 's')
-    { /* Fullscreen */
+  if (str[0] == 'F' && str[1] == 'S')
+    { /* Entire display. */
       geo->x = geo->y = 0;
       geo->width  = DpyWidth;
       geo->height = DpyHeight;
+      return str + 2;
+    }
+  else if (str[0] == 'f' && str[1] == 's')
+    { /* Default size ($DfltWidth x $DfltHeight) */
+      geo->x = geo->y = 0;
+      geo->width  = DfltWidth;
+      geo->height = DfltHeight;
       return str + 2;
     }
 
@@ -4037,6 +4076,10 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
               if (Verbose)
                 printf("New window: 0x%lx\n", Newborn);
 
+              /* Inherit the default size. */
+              DfltWidth = geo.width;
+              DfltHeight = geo.height;
+
               /* Give a default unique name to the window. */
               snprintf(name, sizeof(name), "map_%u_%d", NWindows++, getpid());
               XStoreName(Dpy, Newborn, name);
@@ -4504,7 +4547,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
               else
                 { /* $optarg is the desired sibling. */
                   config.stack_mode = optchar == 'R' ? Above : Below;
-                  if (!(config.sibling  = choose_window(optarg)))
+                  if (!(config.sibling = choose_window(optarg)))
                     break;
                 }
 
@@ -4808,7 +4851,32 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
 
               gc = None;
               valmask = 0;
-              if ((cmd = isprefix(optarg, "fill=")) != NULL)
+              if ((cmd = isprefix(optarg, "dflt=")) != NULL)
+                {   /* Set the default size. */
+                  short w, h;
+                  char const *p;
+
+                  if (!isprefix(cmd, "0x")
+                      && (p = get_dims_or_coords(cmd, &w, &h,
+                                                 True, True, True)) != NULL)
+                    { /* dflt=<size> */
+                      cmd = p;
+                      DfltWidth = w;
+                      DfltHeight = h;
+                    }
+                  else
+                    { /* Take the size of $sample. */
+                      Window sample;
+                      XWindowAttributes attrs;
+
+                      sample = must_choose_window(cmd);
+                      get_win_attrs(sample, &attrs, True, NULL);
+                      DfltWidth = attrs.width;
+                      DfltHeight = attrs.height;
+                      break;
+                    }
+                }
+              else if ((cmd = isprefix(optarg, "fill=")) != NULL)
                 { /* Draw a filled rectangle. */
                   XRectangle rect;
 
@@ -5288,8 +5356,8 @@ int main(int argc, char const *const *argv)
 
   Scr = DefaultScreen(Dpy);
   Root = DefaultRootWindow(Dpy);
-  DpyWidth = DisplayWidth(Dpy, Scr);
-  DpyHeight = DisplayHeight(Dpy, Scr);
+  DpyWidth = DfltWidth = DisplayWidth(Dpy, Scr);
+  DpyHeight = DfltHeight = DisplayHeight(Dpy, Scr);
   Utf8 = XInternAtom(Dpy, "UTF8_STRING", False);
   /* }}} */
 
