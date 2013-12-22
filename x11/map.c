@@ -867,45 +867,70 @@ static unsigned char untrap_xerrors(void)
  * Returns whether the results are thought to be accurate. */
 static Bool get_dimensions(float *wmmp, float *hmmp)
 {
-#ifdef HAVE_OMAPFB
+#if defined(HAVE_FB) || defined(HAVE_OMAPFB)
   static int tried;
   static float wmm, hmm;
+  int hfb;
 
   /* Ask the kernel because X falsifies the information such that
-   * the DPI is some conventional value.. */
-  if (!tried)
+   * the DPI is some conventional value. */
+  if (!tried && (hfb = open("/dev/fb0", 0)) >= 0)
     {
-      int hfb;
+# ifdef HAVE_OMAPFB
       struct omapfb_display_info di;
 
-      if ((hfb = open("/dev/fb0", 0)) >= 0
-          && ioctl(hfb, OMAPFB_GET_DISPLAY_INFO, &di) == 0)
+      if (ioctl(hfb, OMAPFB_GET_DISPLAY_INFO, &di) == 0)
         { /* Convert from u-meters to milimeters. */
           wmm = di.width  / 1000.0;
           hmm = di.height / 1000.0;
           tried = True;
         }
-      else
-        { /* Fallback */
-          wmm = DisplayWidthMM(Dpy, Scr);
-          hmm = DisplayHeightMM(Dpy, Scr);
-          tried = -True;
-        }
-      close(hfb);
-    } /* Haven't tried to get the dimensions yet. */
+# endif /* HAVE_OMAPFB */
+# ifdef HAVE_FB
+      if (!tried)
+        {
+          struct fb_var_screeninfo fi;
 
+          /* Actually, I haven't seen this method working. */
+          memset(&fi, 0, sizeof(fi));
+          if (ioctl(hfb, FBIOGET_VSCREENINFO, &fi) == 0
+              && (int)fi.width > 0 && (int)fi.height > 0)
+            {
+              wmm = fi.width;
+              hmm = fi.height;
+              tried = True;
+            }
+        }
+# endif /* HAVE_FB */
+      close(hfb);
+    } /* Haven't $tried and /dev/fb is accessible. */
+
+  if (tried > 0)
+    {
+      if (wmmp)
+        *wmmp = wmm;
+      if (hmmp)
+        *hmmp = hmm;
+      return True;
+    }
+  else
+    tried = -True;
+#endif /* HAVE_FB || HAVE_OMAPFB */
+
+#ifdef HAVE_FREMANTLE
+  /* Fortunately we know the px/mm density. */
   if (wmmp)
-    *wmmp = wmm;
+    *wmmp = DpyWidth / 10.5;
   if (hmmp)
-    *hmmp = hmm;
-  return tried > 0;
+    *hmmp = DpyHeight / 10.5;
+  return True;
 #else /* Give in to the lies. */
   if (wmmp)
     *wmmp = DisplayWidthMM(Dpy, Scr);
   if (hmmp)
     *hmmp = DisplayHeightMM(Dpy, Scr);
   return False;
-#endif /* HAVE_OMAPFB */
+#endif /* ! HAVE_FREMANTLE */
 } /* get_dimensions */
 
 /* If $p points at a known length suffix returns how much to scale
