@@ -900,8 +900,10 @@ static Bool get_dimensions(float *wmmp, float *hmmp)
     *hmmp = hmm;
   return tried > 0;
 #else /* Give in to the lies. */
-  *wmmp = DisplayWidthMM(Dpy, Scr);
-  *hmmp = DisplayHeightMM(Dpy, Scr);
+  if (wmmp)
+    *wmmp = DisplayWidthMM(Dpy, Scr);
+  if (hmmp)
+    *hmmp = DisplayHeightMM(Dpy, Scr);
   return False;
 #endif /* HAVE_OMAPFB */
 } /* get_dimensions */
