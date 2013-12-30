@@ -2161,7 +2161,7 @@ static void print_info(Drawable win, Bool recursive, unsigned level)
   /* Print the window's name. */
   name = cls.res_name = cls.res_class = NULL;
   if (is_window)
-    { /* Pixmap don't have a name. */
+    { /* Pixmaps don't have a name. */
       XFetchName(Dpy, win, &name);
       XGetClassHint(Dpy, win, &cls);
     }
@@ -2949,7 +2949,7 @@ static void open_image(struct image_st *img, char const *fname,
   if (!warned)
     {
       fputs("Warning: writing raw RGB image.  You can convert it to PNG "
-            "by the following ImageMagick command:\n", stderr);
+            "with the following ImageMagick command:\n", stderr);
       warned = 1;
     }
 #endif /* ! HAVE_GDK_PIXBUF && ! HAVE_QT */
