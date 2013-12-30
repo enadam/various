@@ -606,6 +606,7 @@
 
 /* Include files */
 #include <stdlib.h>
+#include <stdint.h>
 #include <unistd.h>
 #include <limits.h>
 #include <assert.h>
@@ -2652,9 +2653,10 @@ struct image_st
 # define mkrgb qRgba
 typedef QRgb rgb_st;
 #else
-typedef struct
+typedef union
 {
-  unsigned char r, g, b, a;
+  struct { uint32_t r, g, b, a; };
+  char bytes[0];
 } rgb_st;
 
 static rgb_st mkrgb(unsigned char r, unsigned char g, unsigned char b,
@@ -2964,26 +2966,39 @@ static void open_image(struct image_st *img, char const *fname,
 static void write_image(struct image_st *img, rgb_st rgb)
 {
 #ifdef HAVE_GDK_PIXBUF
-  if (img->pixbuf)
+  if (!img->pixbuf)
+    fwrite(rgb.bytes, img->has_alpha ? 4 : 3, 1, img->st);
+  else if (img->has_alpha)
     {
-      *img->ptr++ = rgb.r;
-      *img->ptr++ = rgb.g;
-      *img->ptr++ = rgb.b;
-      if (img->has_alpha)
-        *img->ptr++ = rgb.a;
-      return;
+      memcpy(img->ptr, rgb.bytes, 4);
+      img->ptr += 4;
+    }
+  else
+    {
+      memcpy(img->ptr, rgb.bytes, 3);
+      img->ptr += 3;
     }
 #endif /* HAVE_GDK_PIXBUF */
 
 #ifdef HAVE_QT
-  if (img->qimg)
+  if (!img->qimg)
     {
-      *img->ptr++ = rgb;
-      return;
-    }
-#endif /* HAVE_QT */
+      char pixel[4];
 
-  fwrite(&rgb, img->has_alpha ? 4 : 3, 1, img->st);
+      pixel[0] = qRed(rgb);
+      pixel[1] = qGreen(rgb);
+      pixel[2] = qBlue(rgb);
+      if (img->has_alpha)
+        {
+          pixel[4] = qAlpha(rgb);
+          fwrite(pixel, 4, 1, img->st);
+        }
+      else
+        fwrite(pixel, 3, 1, img->st);
+    }
+  else
+    *img->ptr++ = rgb;
+#endif /* HAVE_QT */
 } /* write_image */
 
 /* Finalize $img. */
