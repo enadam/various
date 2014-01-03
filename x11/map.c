@@ -619,6 +619,7 @@
 #include <math.h>
 #include <time.h>
 #include <signal.h>
+#include <arpa/inet.h>
 #include <sys/time.h>
 #include <sys/shm.h>
 #include <sys/mman.h>
@@ -2655,7 +2656,7 @@ typedef QRgb rgb_st;
 #else
 typedef union
 {
-  struct { uint32_t r, g, b, a; };
+  struct { uint8_t r, g, b, a; };
   char bytes[0];
 } rgb_st;
 
@@ -2978,27 +2979,59 @@ static void write_image(struct image_st *img, rgb_st rgb)
       memcpy(img->ptr, rgb.bytes, 3);
       img->ptr += 3;
     }
+  return;
 #endif /* HAVE_GDK_PIXBUF */
 
 #ifdef HAVE_QT
   if (!img->qimg)
     {
+# ifdef __ARMEL__
       char pixel[4];
 
+      /* Convert $rgb (an integer) to $pixel (array of bytes).
+       * This is byte-order neutral. */
       pixel[0] = qRed(rgb);
       pixel[1] = qGreen(rgb);
       pixel[2] = qBlue(rgb);
       if (img->has_alpha)
         {
-          pixel[4] = qAlpha(rgb);
+          pixel[3] = qAlpha(rgb);
           fwrite(pixel, 4, 1, img->st);
         }
       else
         fwrite(pixel, 3, 1, img->st);
+# else /* ! __ARMEL__ */
+      unsigned tmp;
+
+      /* Convert $rgb to an integer with bit operations.  This is faster
+       * (smaller) on x86.  Note that we assume that QRgb is 0xAARRGGBB.
+       * This is probably not a big deal, but it's good to know. */
+      tmp = rgb;
+#if __BYTE_ORDER == __LITTLE_ENDIAN
+      tmp = htonl(tmp);
+#endif
+      tmp >>= 8;
+      if (img->has_alpha)
+        {
+#if __BYTE_ORDER == __BIG_ENDIAN
+          rgb <<= 24;
+#endif
+          tmp |= rgb & 0xFF000000;
+          fwrite(&tmp, 4, 1, img->st);
+        }
+      else
+        fwrite(&tmp, 3, 1, img->st);
+# endif /* ! __ARMEL__ */
     }
   else
+    /* We have a QImage to write to. */
     *img->ptr++ = rgb;
+  return;
 #endif /* HAVE_QT */
+
+#if !defined(HAVE_GDK_PIXBUF) && !defined(HAVE_QT)
+  fwrite(rgb.bytes, img->has_alpha ? 4 : 3, 1, img->st);
+#endif
 } /* write_image */
 
 /* Finalize $img. */
