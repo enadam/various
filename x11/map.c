@@ -2,7 +2,7 @@
   : Our only requirement is x11.  Let us see which optional packages
   : are available.
   pkgs="x11";
-  optional="xfixes xext xcomposite xtst xi xres xft";
+  optional="xfixes xext xcomposite xtst xi xres xft xrender";
 
   : We can live without pkg-config if we must, but we will be very limited.
   if pkg-config --version > /dev/null 2>&1;
@@ -293,6 +293,11 @@
  *                      See the examples.  (Specific to hildon-desktop.)
  * -o name=<something>  Make the <window>'s WM_NAME <something>.
  * -o !name             Unset the WM_NAME of <window>.
+ * -o bg=<img>          Make <img> the background of <window>.  For details
+ *                      of <img> see the -G img=... command.  The difference
+ *                      is that when set as background, the image needn't be
+ *                      redrawn after the window has been unexposed.
+ * -o !bg               Unset the background pixmap of <window>.
  * -o [!]OR             Make the <window>s override redirected or clear
  *                      this attribute.
  * -o [!]focusable      Accept (default) or reject keyboard focus.
@@ -350,6 +355,21 @@
  *                      Make <window>'s size the default.
  * -G text=<X>x<Y>[<color>],<text>[,<font>]
  *                      Draw on the window (or pixmap or other drawable).
+ * -G img={{<src-geo> '%'} | {<dst-geo> '@'} | {<size> '#'}}* <fname>
+ *                      Take the <src-geo> rectangle of the image <fname>,
+ *                      and plot it onto the <dst-geo> rectangle of the
+ *                      <window>, scaling the image as necessary.  The image
+ *                      can be in any format supported by the underlaying
+ *                      toolkit.  If none is available this selection is
+ *                      restricted to straight RGB or RGBA images created
+ *                      by the -z command.  This case the image <size>
+ *                      (in pixels) has to be specified too.  By default
+ *                      the position of <dst-geo> is +0+0 and its size is
+ *                      the same as <src-geo> (which also defaults to +0+0
+ *                      and to the size of the image).  You can use "fs"
+ *                      for example to scale the image to the full size
+ *                      of the <window>.  Other expressioons of <geometry>
+ *                      are understood as well.
  * -X [u]app[{@none|<color>}]
  *                      Creates a simple maximized application window.
  *                      If prefixed with 'u' you'll have to map it explicitly.
@@ -500,6 +520,16 @@
  *     Create an application window, then go to the switcher, wait, ...
  *   * map -z /ide_%t_%20C.png/ -W 5s -W loop
  *     Take a screenshot every five seconds and preserve the last 20 of them.
+ *   * map -n 200x200 -G img=fs@Christi.jpg
+ *     Load the image, scale it to 200x200 pixels and plot it on the newborn.
+ *     (Either a toolkit or Xrender is required for scaling.)
+ *   * map -G img=1cmx1cm%fs@Christi.jpg
+ *     Take the top-left 1x1cm rectangle of Christi.jpg and project it onto
+ *     the new window.  Note relative geometries (ie. those that depend on
+ *     the default size) are not really useful in front of '%', because it's
+ *     NOT relative to the image's natural size.
+ *   * map -G 'img=300x300#me.rgb'
+ *     This is how to draw a raw RGB/RGBA image.
  *   * map -c cc
  *     Click the middle of the screen (center-center).
  *   * map -c 400x400,400x300
@@ -621,6 +651,7 @@
 #include <signal.h>
 #include <arpa/inet.h>
 #include <sys/time.h>
+#include <sys/stat.h>
 #include <sys/shm.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
@@ -669,6 +700,9 @@
 #ifdef HAVE_XFT
 # include <X11/Xft/Xft.h>
 #endif
+#ifdef HAVE_XRENDER
+# include <X11/extensions/Xrender.h>
+#endif
 
 #ifdef HAVE_GDK_PIXBUF
 # include <gdk-pixbuf/gdk-pixbuf.h>
@@ -682,6 +716,11 @@
 # endif
 # include "sgxdefs.h"
 #endif
+
+/* XImage characteristics */
+#define X11_BITS_PER_CHANNEL    8
+#define X11_BYTES_PER_PIXEL     4
+#define X11_BITS_PER_PIXEL      (X11_BITS_PER_CHANNEL * X11_BYTES_PER_PIXEL)
 
 /* Some symbols of xlib are different in C++. */
 #ifndef __cplusplus
@@ -2691,6 +2730,27 @@ static rgb_st mkrgb(unsigned char r, unsigned char g, unsigned char b,
 } /* mkrgb */
 #endif /* ! HAVE_QT */
 
+/* Return the probable alpha mask, ie. the complement of red|green|blue. */
+static unsigned alpha_mask(unsigned red, unsigned green, unsigned blue,
+                           unsigned depth)
+{
+  /* Assume there's an alpha channel if the color masks don't cover
+   * the full $depth.  Be pedantic about not overflowing if it's 32. */
+  assert(red && green && blue);
+  return ((((1 << (depth-1)) - 1) << 1) | 1) & ~(red|green|blue);
+} /* alpha_mask */
+
+/* Returns whether $attrs->visual has an alpha channel
+ * (ie. has an alpha mask). */
+static Bool visual_has_alpha(XWindowAttributes const *attrs)
+{
+  Visual const *visual;
+
+  visual = attrs->visual;
+  return alpha_mask(visual->red_mask, visual->green_mask, visual->blue_mask,
+                    attrs->depth) != 0;
+} /* visual_has_alpha */
+
 /* Returns the length of $n in decimal representation. */
 static unsigned digitsof(unsigned long n)
 {
@@ -3092,11 +3152,6 @@ static void save_rgb_image(char const *fname, unsigned char const *in,
   struct image_st out;
   unsigned inner, outer;
 
-  /* Assume there's an alpha channel if the color masks don't cover
-   * the full $depth.  Be pedantic about not overflowing if it's 32. */
-  assert(red && green && blue);
-  alpha = ((((1 << (depth-1)) - 1) << 1) | 1) & ~(red|green|blue);
-
   /* If $Rotated start scanning from bottom-left and traverse up/right. */
   assert(width > 0 && height > 0);
   if (Rotated)
@@ -3111,6 +3166,7 @@ static void save_rgb_image(char const *fname, unsigned char const *in,
       inner = width;
     }
 
+  alpha = alpha_mask(red, green, blue, depth);
   open_image(&out, fname, inner, outer, !!alpha);
   for (; outer > 0; outer--)
     {
@@ -3193,6 +3249,775 @@ static void save_yuv_image(char const *fname, unsigned char const *img,
     } /* while we have UYVY:s */
   close_image(&out);
 } /* save_yuv_image */
+
+/* Image loading (-G img, -o bg) */
+/*
+ * Deduce $src->width and $src->height from $orig_w and $orig_h,
+ * and $dst->width and $dst->height from $src if they're missing (zero).
+ * Returns whether $src is NOT equivalent to ${orig_w}x${orig_h}+0+0,
+ * ie. when the source rectangle is not a continuouos byte array.
+ */
+static Bool determine_image_rectangles(XRectangle *src, XRectangle *dst,
+                                       int orig_w, int orig_h)
+{
+  assert(orig_w > 0 && orig_h > 0);
+
+  /* Deduce $src->width, making sure that $src is contained within
+   * $orig_w x $orig_height. */
+  if (!src->width)
+    {
+      if (src->x >= orig_w)
+        die("X offset of the source rectangle is too large\n");
+      src->width = orig_w - src->x;
+    } else if (src->x + src->width > orig_w)
+      die("source rectangle is too wide\n");
+
+  /* Determine/verify $src->height. */
+  if (!src->height)
+    {
+      if (src->y >= orig_h)
+        die("Y offset of the source rectangle is too large\n");
+      src->height = orig_h - src->y;
+    } else if (src->y + src->height > orig_h)
+      die("height of the source rectangle is too high\n");
+
+  /* Set $dst->width and height if not specified. */
+  if (!dst->width)
+    dst->width = src->width;
+  if (!dst->height)
+    dst->height = src->height;
+
+  return src->x || src->y || src->width != orig_w || src->height != orig_h;
+} /* determine_image_rectangles */
+
+/*
+ * Return the mmap($fname) of an RGB[A] image.  The dimensions of the image
+ * must be given in $orig_w and $orig_h in pixels, which are used to decide
+ * whether the image has an alpha channel (returned in *$alphap).  The file
+ * size is also rturned to make it possible for the caller to munmap() the
+ * file later.  The file descriptor is closed before the function returns.
+ */
+static void *mmap_rgb(char const *fname, off_t *fsizep, Bool *alphap,
+                      unsigned orig_w, unsigned orig_h)
+{
+  int fd;
+  char *ptr;
+  struct stat sbuf;
+
+  if ((fd = open(fname, O_RDONLY)) < 0)
+    die("couldn't open input image\n");
+
+  /* Is it an RGB or an RGBA image? */
+  assert(fstat(fd, &sbuf) == 0);
+  if (sbuf.st_size == (off_t)(3 * orig_w * orig_h))
+    *alphap = False;
+  else if (sbuf.st_size == (off_t)(4 * orig_w * orig_h))
+    *alphap = True;
+  else
+    die("RGB image has invalid size\n");
+
+  /* It's OK to close($fd) having mmap()ped it successfully. */
+  ptr = (char *)mmap(NULL, sbuf.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+  assert(ptr != MAP_FAILED);
+  close(fd);
+
+  /* Done, caller can munmap($ptr, *$fsizep) when it's finished. */
+  *fsizep = sbuf.st_size;
+  return ptr;
+} /* mmap_rgb */
+
+/* Return a $width x $height XImage of $data (which must be in the correct
+ * BGR888 or BGRA8888 format). */
+static XImage *mkximg(Visual *visual, Bool has_alpha,
+                      unsigned width, unsigned height, char *data)
+{
+  unsigned nch;
+
+  nch = has_alpha ? 4 : 3;
+  return XCreateImage(Dpy, visual,
+                      X11_BITS_PER_CHANNEL * nch  /* depth */,
+                      ZPixmap, 0                  /* format, offset */,
+                      data, width, height         /* data, width, height */,
+                      X11_BITS_PER_PIXEL          /* bitmap_pad */,
+                      X11_BYTES_PER_PIXEL * width /* bytes_per_line */);
+} /* mkximg */
+
+/* Read the $dst rectangle of an $src_w x $src_h RGB[A] image from $srcp,
+ * and return a dynamically allocated byte array suitable for XImage.
+ * The implementatio is fine-tuned for big-endian, armel and x86. */
+static char *read_ximage_pixels(char const *srcp, Bool has_alpha,
+                                unsigned src_w, unsigned src_h,
+                                XRectangle const *dst)
+{
+  char const *in;
+  char *dstp, *out;
+  unsigned ibpp, obpp, size;
+
+  /* Determine the input/output bytes per pixel, and allocate memory
+   * for the output. */
+  ibpp = has_alpha ? 4 : 3;
+  obpp = X11_BYTES_PER_PIXEL;
+  size = obpp * dst->width * dst->height;
+  dstp = xmalloc(&out,  size);
+
+  /* Get the $dst rectangele of $srcp and write it to $dstp.  We process
+   * the image pixel by pixel (because some conversion is alwas necessary),
+   * trying to use as few instructions as possible. */
+  for (in = &srcp[ibpp * (src_w*dst->y + dst->x)];
+       out < &dstp[size];
+       in += ibpp * (src_w - dst->width))
+    {
+      unsigned x;
+
+      /* Copy a row. */
+      if (has_alpha)
+        {
+          for (x = dst->width; x > 0; x--)
+            {
+#if __BYTE_ORDER == __BIG_ENDIAN
+              uint32_t *rgb;
+
+              rgb = (uint32_t *)out;
+              memcpy(rgb, in, ibpp);
+              *rgb = (*rgb << 8) | (*rgb >> 24);
+              in += ibpp;
+#elif !defined(__ARMEL__)
+              uint32_t *rgb;
+
+              rgb = (uint32_t *)out;
+              memcpy(rgb, in, ibpp);
+              *rgb = (htonl(*rgb) >> 8) | (*rgb & 0xFF000000);
+              in += ibpp;
+#else /* __ARMEL __ */
+              out[2] = *in++;
+              out[1] = *in++;
+              out[0] = *in++;
+              out[3] = *in++;
+#endif /* __ARMEL__ */
+              out += obpp;
+            } /* for each pixel in the row */
+        }
+      else /* ! $has_alpha */
+        {
+          for (x = dst->width; x > 0; x--)
+            {
+#if __BYTE_ORDER == __BIG_ENDIAN
+              uint32_t *rgb;
+
+              rgb = (uint32_t *)out;
+              memcpy(rgb, in, ibpp);
+              *rgb = (*rgb << 8) | 0xFF;
+              in += ibpp;
+#elif !defined(__ARMEL__)
+              uint32_t *rgb;
+
+              rgb = (uint32_t *)out;
+              memcpy(rgb, in, ibpp);
+              *rgb = (htonl(*rgb) >> 8) | 0xFF000000;
+              in += ibpp;
+#else /* __ARMEL __ */
+              out[2] = *in++;
+              out[1] = *in++;
+              out[0] = *in++;
+              out[3] = 0xFF;
+#endif /* __ARMEL__ */
+              out += obpp;
+            } /* for each pixel in the row */
+        } /* ! $has_alpha */
+    } /* for each row */
+
+  return dstp;
+} /* read_ximage_pixels */
+
+#ifdef HAVE_XRENDER
+/* Return the quotient of $up/$down, where all factors are 16.16 fixed point
+ * numbers.  This representation is used by XRender. */
+static XFixed fixdiv(XFixed up, XFixed down)
+{
+  /* up*2^32 / down*2^16 = (up/down)*2^16
+   * == up/down in XFixed representation */
+#ifdef _LP64
+  ldiv_t d;
+  d = ldiv((uint64_t)up << 32, (unsigned)down << 16);
+#else /* 32bit */
+  lldiv_t d;
+  d = lldiv((uint64_t)up << 32, (unsigned)down << 16);
+#endif
+
+  /* If the type conversion is not in place something goes wrong,
+   * and the assertion fails when it shouldn't. */
+  assert(8*sizeof(d.quot) >= 64);
+  assert((uint64_t)d.quot <= (uint64_t)(~(XFixed)0));
+  return d.quot;
+} /* fixdiv */
+#endif /* HAVE_XRENDER */
+
+/* Take the $src rectangle of the ${orix_w}x${orig_h} image in $fname,
+ * and project it onto the $dst rectangle of $drw.  If $drw is None,
+ * a new Pixmap will be created and returned. */
+static Drawable plot_image_with_x11(Drawable drw, GC gc,
+                                    XWindowAttributes const *attrs,
+                                    char const *fname,
+                                    unsigned orig_w, unsigned orig_h,
+                                    XRectangle *src, XRectangle *dst)
+{
+  char *dstp;
+  off_t fsize;
+  XImage *ximg;
+  char const *srcp;
+  Drawable __attribute__((unused)) final;
+  Bool has_alpha, add_alpha, need_to_scale;
+
+  /* $fname -> $srcp */
+  assert(orig_w > 0 && orig_h > 0);
+  srcp = (char const *)mmap_rgb(fname, &fsize, &has_alpha, orig_w, orig_h);
+
+  /* $srcp -> $dstp */
+  determine_image_rectangles(src, dst, orig_w, orig_h);
+  dstp = read_ximage_pixels(srcp, has_alpha, orig_w, orig_h, src);
+  munmap((void *)srcp, fsize);
+
+  /* $dstp -> $ximg */
+  add_alpha = visual_has_alpha(attrs);
+  ximg = mkximg(attrs->visual, add_alpha, src->width, src->height, dstp);
+
+  /* If @need_to_scale, replace $drw with a temporary pixmap. */
+  final = drw;
+  need_to_scale = dst->width != src->width || dst->height != src->height;
+  if (drw == None || need_to_scale)
+    drw = XCreatePixmap(Dpy, Root, src->width, src->height, attrs->depth);
+
+  if (!need_to_scale)
+    { /* $ximg -> $drw straightly */
+      XPutImage(Dpy, drw, gc, ximg,
+                /* src_x, src_y, dst_x, dst_y, dst_w, dst_h */
+                0, 0, dst->x, dst->y, dst->width, dst->height);
+      XDestroyImage(ximg);
+      return drw;
+    }
+#ifdef HAVE_XRENDER
+  else
+    { /* $ximg -> temporary -> final pixmap */
+      XTransform transform;
+      XRenderPictFormat *fmt;
+      Picture drw_pic, final_pic;
+
+      /* $ximg -> $drw */
+      XPutImage(Dpy, drw, gc, ximg,
+                /* src_x, src_y, dst_x, dst_y, dst_w, dst_h */
+                0, 0, 0, 0, src->width, src->height);
+      XDestroyImage(ximg);
+
+      /* $drw -> $drw_pic */
+      fmt = XRenderFindStandardFormat(Dpy, add_alpha
+                                      ? PictStandardARGB32
+                                      : PictStandardRGB24);
+      drw_pic = XRenderCreatePicture(Dpy, drw, fmt, 0, NULL);
+
+      /*
+       * Scale $drw_pic.  The transformation matrix for scaling is
+       * scale_x 0       0
+       * 0       scale_h 0
+       * 0       0       1
+       */
+      memset(&transform, 0, sizeof(transform));
+      transform.matrix[0][0] = fixdiv(src->width, dst->width);
+      transform.matrix[1][1] = fixdiv(src->height, dst->height);
+      transform.matrix[2][2] = 1 << 16; /* == 1 in XFixed */
+      XRenderSetPictureTransform(Dpy, drw_pic, &transform);
+      XRenderSetPictureFilter(Dpy, drw_pic, "best", NULL, 0);
+
+      /* $drw_pic -> $final */
+      if (final == None)
+        final = XCreatePixmap(Dpy, Root, dst->width, dst->height,
+                              attrs->depth);
+      final_pic = XRenderCreatePicture(Dpy, final, fmt, 0, NULL);
+      XRenderComposite(Dpy, PictOpSrc, drw_pic, None, final_pic,
+                       /* src_x, src_y, mask_x, mask_y */
+                       0, 0, 0, 0,
+                       dst->x, dst->y, dst->width, dst->height);
+
+      XRenderFreePicture(Dpy, drw_pic);
+      XRenderFreePicture(Dpy, final_pic);
+      return final;
+    }
+#else /* ! HAVE_XRENDER */
+  die("can't scale image\n");
+#endif /* ! HAVE_XRENDER */
+} /* plot_image_with_x11 */
+
+#ifdef HAVE_GDK_PIXBUF
+/* Like read_ximage_pixels(), return the $dst rect. of the ${src_w}x${src_h}
+ * $srcp image.  ($src_h is actually unused, because we rely on $dst being
+ * within the physical boundaries of $srcp) */
+static char *read_gdk_pixels(char const *srcp, Bool has_alpha,
+                             unsigned src_w, unsigned src_h,
+                             XRectangle const *dst)
+{
+  char const *in;
+  char *dstp, *out;
+  unsigned bpp, size;
+
+  /* Input/output bytes per pixel and size of the destination image. */
+  bpp = has_alpha ? 4 : 3;
+  size = bpp * dst->width * dst->height;
+
+  /* Start $in from the top-left corner of $srcp. */
+  in  = &srcp[bpp * (src_w*dst->y + dst->x)];
+  out = xmalloc(&dstp, size);
+  while (out < &dstp[size])
+    { /* Scan out a whole row at a time. */
+      memcpy(out, in, bpp * dst->width);
+      out += bpp * dst->width;
+      in  += bpp * src_w;
+    } /* for each row */
+
+  return dstp;
+} /* read_gdk_pixels */
+
+/* Scale $pixbuf to $dst->widht x $dst->height. */
+static GdkPixbuf *scale_gdk(GdkPixbuf *pixbuf, XRectangle *dst)
+{
+  GdkPixbuf *scaled;
+
+  scaled = gdk_pixbuf_scale_simple(pixbuf, dst->width, dst->height,
+                                   GDK_INTERP_BILINEAR);
+  gdk_pixbuf_unref(pixbuf);
+
+  dst->width  = gdk_pixbuf_get_width(scaled);
+  dst->height = gdk_pixbuf_get_height(scaled);
+
+  return scaled;
+} /* scale_gdk */
+
+/* Like plot_image_with_x11(), except that $fname can either be in RGB[A]
+ * (in which case $orig_w and $orig_h are mandatory) or in any format
+ * understood by gdk-pixbuf. */
+static Drawable plot_image_with_gdk(Drawable drw, GC gc,
+                                    XWindowAttributes const *attrs,
+                                    char const *fname,
+                                    unsigned orig_w, unsigned orig_h,
+                                    XRectangle *src, XRectangle *dst)
+{
+  XImage *ximg;
+  guchar *srcp;
+  GdkPixbuf *pixbuf;
+  char *dstp, *row, *col;
+  unsigned nch, irs, ors;
+  Bool has_alpha, add_alpha;
+
+  /* Get $pixbuf. */
+  if (orig_w)
+    { /* RGB, possibly crop and/or scale */
+      off_t fsize;
+      Bool needs_to_crop;
+
+      /* $fname -> $srcp */
+      assert(orig_h > 0);
+      needs_to_crop = determine_image_rectangles(src, dst, orig_w, orig_h);
+      srcp = (guchar *)mmap_rgb(fname, &fsize, &has_alpha, orig_w, orig_h);
+      irs = (has_alpha ? 4 : 3) * src->width;
+
+      g_type_init();
+      if (needs_to_crop)
+        { /* $srcp -> $dstp -> $pixbuf */
+          dstp = read_gdk_pixels((const char *)srcp, has_alpha,
+                                 orig_w, orig_h, src);
+          munmap(srcp, fsize);
+          srcp = NULL;
+
+          pixbuf = gdk_pixbuf_new_from_data((guchar const *)dstp,
+                                            GDK_COLORSPACE_RGB, has_alpha,
+                                            X11_BITS_PER_CHANNEL,
+                                            src->width, src->height, irs,
+                                            NULL, NULL);
+        }
+      else
+        { /* no crop; $srcp -> $pixbuf directly */
+          dstp = NULL;
+          pixbuf = gdk_pixbuf_new_from_data(srcp,
+                                            GDK_COLORSPACE_RGB, has_alpha,
+                                            X11_BITS_PER_CHANNEL,
+                                            src->width, src->height, irs,
+                                            NULL, NULL);
+        }
+
+      /* Scale $pixbuf to $dst->widht x $dst->height. */
+      pixbuf = scale_gdk(pixbuf, dst);
+
+      /* Clean up. */
+      if (srcp)
+        munmap(srcp, fsize);
+      free(dstp);
+    }
+  else if (!src->x && !src->y
+           && !src->width && !src->height
+           && (dst->width || dst->height))
+    { /* Not RGB, no cropping, just scale. */
+      GError *err;
+
+      /* Load $fname at scaled size ($dst->width x $dst->height) right away. */
+      err = NULL;
+      g_type_init();
+      if (!(pixbuf = gdk_pixbuf_new_from_file_at_scale(fname,
+                                                  dst->width  ? dst->width : -1,
+                                                  dst->height ? dst->height : -1,
+                                                  FALSE, &err)))
+              die(err->message);
+      dst->width  = gdk_pixbuf_get_width(pixbuf);
+      dst->height = gdk_pixbuf_get_height(pixbuf);
+    }
+  else
+    { /* Crop (and scale possibly). */
+      GError *err;
+
+      /* $fname -> $pixbuf */
+      err = NULL;
+      g_type_init();
+      if (!(pixbuf = gdk_pixbuf_new_from_file(fname, &err)))
+        die(err->message);
+
+      /* Crop $pixbuf if necessary. */
+      if (determine_image_rectangles(src, dst,
+                                     gdk_pixbuf_get_width(pixbuf),
+                                     gdk_pixbuf_get_height(pixbuf)))
+        {
+          GdkPixbuf *cropped;
+
+          cropped = gdk_pixbuf_new_subpixbuf(pixbuf,
+                                             src->x, src->y,
+                                             src->width, src->height);
+          gdk_pixbuf_unref(pixbuf);
+          pixbuf = cropped;
+        }
+
+      /* Scale $pixbuf if necessary. */
+      if (dst->width != src->width || dst->height != src->height)
+              pixbuf = scale_gdk(pixbuf, dst);
+    } /* get $pixbuf */
+
+  assert(gdk_pixbuf_get_bits_per_sample(pixbuf) == X11_BITS_PER_CHANNEL);
+
+  /* $has_alpha == whether $pixbuf has an alpha channel,
+   * $add_alpha == whether $drw has an alpha channel */
+  has_alpha = gdk_pixbuf_get_has_alpha(pixbuf);
+  add_alpha = visual_has_alpha(attrs);
+
+  /* Number of channels in $pixbuf. */
+  nch = has_alpha ? 4 : 3;
+  assert(nch == gdk_pixbuf_get_n_channels(pixbuf));
+
+  /* Input/output rowstride. */
+  irs = gdk_pixbuf_get_rowstride(pixbuf);
+  ors = X11_BYTES_PER_PIXEL * dst->width;
+
+  /* Source and destination image data. */
+  srcp = gdk_pixbuf_get_pixels(pixbuf);
+  xmalloc(&dstp, ors * dst->height);
+
+  /* Convert $srcp (RGB[A]) -> $dstp (BGR[A]). */
+  printf("%d %d\n", has_alpha, add_alpha);
+  for (row = dstp; row < &dstp[ors * dst->height]; row += ors)
+    {
+      for (col = row; col < &row[ors]; srcp += nch)
+        {
+          *col++ = srcp[2];
+          *col++ = srcp[1];
+          *col++ = srcp[0];
+          *col++ = has_alpha && add_alpha ? srcp[3] : 0xFF;
+        }
+      srcp += irs - nch*dst->width;
+    }
+  gdk_pixbuf_unref(pixbuf);
+
+  /* $dstp -> $ximg -> $drw */
+  ximg = mkximg(attrs->visual, add_alpha, dst->width, dst->height, dstp);
+  if (drw == None)
+    drw = XCreatePixmap(Dpy, Root, dst->width, dst->height, attrs->depth);
+  XPutImage(Dpy, drw, gc, ximg,
+            /* src_x, src_y, dst_x, dst_y, dst_w, dst_h */
+            0, 0, dst->x, dst->y, dst->width, dst->height);
+  XDestroyImage(ximg);
+
+  return drw;
+} /* plot_image_with_gdk */
+#elif defined(HAVE_QT)
+/* Like read_ximage_pixels(), except that the returned dynamically allocated
+ * byte array is suitable for QImage construction. */
+static unsigned char *read_qimage_pixels(unsigned char const *srcp, Bool has_alpha,
+                                         unsigned src_w, unsigned src_h,
+                                         XRectangle const *dst)
+{
+  unsigned char const *in;
+  unsigned char *dstp, *out;
+  unsigned ibpp, obpp, size;
+
+  /* Input/output bytes per pixel. */
+  ibpp = has_alpha ? 4 : 3;
+  obpp = sizeof(QRgb);
+
+  /* Size and allocation of output buffer. */
+  size = obpp * dst->width * dst->height;
+  out  = (unsigned char *)xmalloc(&dstp, size);
+
+  /* Scan out row by row, pixel by pixel. */
+  for (in = &srcp[ibpp * (src_w*dst->y + dst->x)];
+       out < &dstp[size];
+       in += ibpp * (src_w - dst->width))
+    {
+      QRgb *rgb;
+      unsigned x;
+
+      if (has_alpha)
+        {
+          for (x = dst->width; x > 0; x--)
+            {
+              rgb = (QRgb *)out;
+
+#if __BYTE_ORDER == __BIG_ENDIAN
+              memcpy(rgb, in, ibpp);
+              *rgb = (*rgb << 8) | (*rgb >> 24);
+#elif !defined(__ARMEL__)
+              memcpy(rgb, in, 4);
+              *rgb = htonl(*rgb);
+              *rgb = (*rgb >> 8) | (*rgb << 24);
+#else /* __ARMEL __ */
+              *rgb  = in[2];
+              *rgb |= in[1] <<  8;
+              *rgb |= in[0] << 16;
+              *rgb |= in[3] << 24;
+#endif /* __ARMEL__ */
+
+              in  += ibpp;
+              out += obpp;
+            } /* for each pixel in the row */
+        } /* $has_alpha */
+      else
+        {
+          for (x = dst->width; x > 0; x--)
+            {
+              rgb = (QRgb *)out;
+
+#if __BYTE_ORDER == __BIG_ENDIAN
+              memcpy(rgb, in, ibpp);
+              *rgb = (*rgb << 8) | 0xFF;
+#elif !defined(__ARMEL__)
+              memcpy(rgb, in, ibpp);
+              *rgb = htonl(*rgb);
+              *rgb = (*rgb >> 8) | 0xFF000000;
+#else /* __ARMEL__ */
+              *rgb  = in[2];
+              *rgb |= in[1] << 8;
+              *rgb |= in[0] << 16;
+              *rgb |= 0xFF000000;
+#endif /* __ARMEL__ */
+
+              in  += ibpp;
+              out += obpp;
+            } /* for each pixel in the row */
+        } /* ! $has_alpha */
+    } /* for each row */
+
+  return dstp;
+} /* read_qimage_pixels */
+
+/* Destructor function for XImage which does NOT free the image data
+ * (because it's owned by a QImage). */
+static int destroy_qt_ximage(XImage *ximg)
+{
+  if (ximg->obdata)
+    XFree(ximg->obdata);
+  XFree(ximg);
+  return 1;
+} /* destroy_qt_ximage */
+
+/* Like plot_image_with_gdk(), except that it uses QImage. */
+static Drawable plot_image_with_qt(Drawable drw, GC gc,
+                                   XWindowAttributes const *attrs,
+                                   char const *fname,
+                                   unsigned orig_w, unsigned orig_h,
+                                   XRectangle *src, XRectangle *dst)
+{
+  QImage qimg;
+  XImage *ximg;
+  unsigned char *data;
+
+  /* Get $qimg at $src->width x $src->height. */
+  if (orig_w)
+    { /* read raw RGB */
+      off_t fsize;
+      Bool has_alpha;
+      unsigned const char *srcp;
+
+      determine_image_rectangles(src, dst, orig_w, orig_h);
+      srcp = (unsigned char const *)mmap_rgb(fname, &fsize, &has_alpha,
+                                             orig_w, orig_h);
+      data = read_qimage_pixels(srcp, has_alpha, orig_w, orig_h, src);
+      munmap((void *)srcp, fsize);
+
+      /* $data will NOT be freed by $qimg. */
+      src->x = src->y = 0;
+      qimg = QImage(data, src->width, src->height, has_alpha
+                    ? QImage::Format_ARGB32 : QImage::Format_RGB32);
+    }
+  else
+    { /* not raw RGB, let QImage load it */
+      if (!qimg.load(fname))
+        die("invalid image");
+      data = NULL;
+
+      /* Convert $qimg's internal representation into [A]RGB32,
+       * so its constBits() will be straightly usable with mkximg(). */
+      switch (qimg.format())
+        {
+          case QImage::Format_Invalid:
+            die("invalid format");
+          case QImage::Format_RGB32:
+          case QImage::Format_ARGB32:
+            break;
+          default:
+            qimg = qimg.convertToFormat(qimg.hasAlphaChannel()
+                                        ? QImage::Format_ARGB32
+                                        : QImage::Format_RGB32);
+            break;
+        } /* switch image format */
+
+      /* Crop $qimg if necessary. */
+      if (determine_image_rectangles(src, dst, qimg.width(), qimg.height()))
+        qimg = qimg.copy(src->x, src->y, src->width, src->height);
+    } /* get $qimg */
+
+  /* Scale $qimg if necessary. */
+  if (dst->width != src->width || dst->height != src->height)
+    {
+      qimg = qimg.scaled(dst->width, dst->height,
+                         Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+      dst->width  = qimg.width();
+      dst->height = qimg.height();
+
+      /* free($data) if it's not used anymore. */
+      if (qimg.constBits() != data)
+        {
+          free(data);
+          data = NULL;
+        }
+    } /* scale */
+
+  /* $qimg -> $ximg; override its destructor so that $data is not freed
+   * by XDestroyImage(), because the image data could be entirely $qimg's. */
+  ximg = mkximg(attrs->visual, visual_has_alpha(attrs),
+                dst->width, dst->height, (char *)qimg.constBits());
+  ximg->f.destroy_image = destroy_qt_ximage;
+
+  /* $ximg -> $drw */
+  if (drw == None)
+    drw = XCreatePixmap(Dpy, Root, dst->width, dst->height, attrs->depth);
+  XPutImage(Dpy, drw, gc, ximg,
+            /* src_x, src_y, dst_x, dst_y, dst_w, dst_h */
+            0, 0, dst->x, dst->y, dst->width, dst->height);
+  XDestroyImage(ximg);
+
+  free(data);
+  return drw;
+} /* plot_image_with_qt */
+#endif /* HAVE_QT */
+
+/*
+ * $str := {{<src-geo> '%'} | {<dst-geo> '@'} | {<size> '#'}}* <fname>
+ * Take <src-geo> of <fname> (which, if a raw RGB[A] file, it's <size>
+ * must be declared) and plot it onto $dst of $win, cropping and scaling
+ * the image as necessary.
+ */
+static Drawable plot_image(char const *str, Window win, Bool set_bg)
+{
+  Bool use_x11;
+  char const *p;
+  XRectangle src, dst;
+  unsigned short orig_w, orig_h;
+  GC gc;
+  Drawable drw;
+  Visual visual;
+  XGCValues gcvals;
+  XWindowAttributes attrs;
+
+  /* Parse $str for $src, $dst, $orig_w and $orig_h. */
+  orig_w = orig_h = 0;
+  memset(&src, 0, sizeof(src));
+  memset(&dst, 0, sizeof(dst));
+  for (p = str; *p; p++)
+    {
+      if (*p == '%')
+        { /* Do we have a $src here? */
+          /*
+           * NOTE that this geometry is parsed relative to the default size
+           * (= $win's size), not that of the image (since we don't know its
+           * size yet).  Unfortunately this makes expressions like 100x100br
+           * rather useless.
+           */
+          if (get_geometry_nok(str, &src) != p)
+            break;
+        }
+      else if (*p == '@')
+        { /* $dst */
+          if (get_geometry_nok(str, &dst) != p)
+            break;
+        }
+      else if (*p == '#')
+        { /* $orig_w, $orig_h */
+          if (get_size(str, &orig_w, &orig_h) != p)
+            break;
+          else if (!orig_w || !orig_h)
+            die("invalid size\n");
+        }
+      else
+        continue;
+
+      /* @p poitns at [%@#] */
+      str = p + 1;
+    } /* until <fname> is found */
+
+  /* $str should be <fname>. */
+  if (!*str)
+    die("no input\n");
+
+  get_win_attrs(win, &attrs, True, &visual);
+  gc = XCreateGC(Dpy, win, 0, &gcvals);
+  drw = set_bg ? None : win;
+
+  /* $use_x11 if RGB && (!scale || HAVE_XRENDER) */
+  use_x11 = orig_w && orig_h;
+#ifndef HAVE_XRENDER
+  if (use_x11)
+    { /* XRender is required for scaling. */
+      determine_image_rectangles(&src, &dst, orig_w, orig_h);
+      if (dst.width != src.width || dst.height != src.height)
+        use_x11 = False;
+    }
+#endif /* ! HAVE_XRENDER */
+
+  if (use_x11)
+    drw = plot_image_with_x11(drw, gc, &attrs, str,
+                              orig_w, orig_h, &src, &dst);
+  else
+#if defined(HAVE_GDK_PIXBUF)
+    drw = plot_image_with_gdk(drw, gc, &attrs, str,
+                              orig_w, orig_h, &src, &dst);
+#elif defined(HAVE_QT)
+    drw = plot_image_with_qt(drw, gc, &attrs, str,
+                             orig_w, orig_h, &src, &dst);
+#else /* ! HAVE_GDK_PIXBUF && ! HAVE_QT */
+    die("can't load or plot image\n");
+#endif
+
+  XFreeGC(Dpy, gc);
+  if (set_bg)
+    {
+      XSetWindowBackgroundPixmap(Dpy, win, drw);
+      XFreePixmap(Dpy, drw);
+    }
+
+  return drw;
+} /* plot_image */
 
 /* Return the integer of the specified $width pointed to be $p. */
 static long xval2long(void const *p, unsigned width)
@@ -4472,6 +5297,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                 {
                   Bool set;
                   char *dup;
+                  char const *img;
 
                   dup = opt;
                   if (*opt == '!')
@@ -4491,6 +5317,16 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                     { /* For the idiots. */
                       assert(set);
                       XStoreName(Dpy, win, name);
+                    }
+                  else if (!strcmp(opt, "bg"))
+                    { /* Unset the background. */
+                      assert(!set);
+                      XSetWindowBackgroundPixmap(Dpy, win, None);
+                    }
+                  else if ((img = isprefix(opt, "bg=")) != NULL)
+                    {
+                      assert(set);
+                      plot_image(img, win, True);
                     }
                   else if (!strcmp(opt, "OR"))
                     {
@@ -5068,7 +5904,12 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   XftFontClose(Dpy, font);
                   XftDrawDestroy(xft);
 #endif /* HAVE_XFT */
-                } /* if */
+                }
+              else if ((cmd = isprefix(optarg, "img=")) != NULL)
+                { /* Plot an image on $win. */
+                  plot_image(cmd, win, False);
+                  break;
+                }
               else
                 die("unknown primitive\n");
 
@@ -5366,7 +6207,8 @@ int main(int argc, char const *const *argv)
               "%3$*2$s -A anchor=<gravity>[,<x>,<y>]\n"
               "%3$*2$s -A rotate=<axis>,<degrees>[,<x>,<y>,<z>]\n"
               "%3$*2$s -A scale=<scale-x>[,<scale-y>]\n"
-              "%3$*2$s -o name=NAME\n"
+              "%3$*2$s -o name=NAME -o !name\n"
+              "%3$*2$s -o bg=<img> -o !bg\n"
               "%3$*2$s -o {[!]{OR|focusable|starticonic|iconic|normal|withdrawn|fs}},...\n"
               "%3$*2$s -mu -R [<sibling>|hi|lo|bottom] -L [<sibling>|lo|bottom] -dDK\n"
               "%3$*2$s -k [[<duration>]:][{ctrl|alt|fn}-]...{<keysym>|<string>}\n"
@@ -5375,6 +6217,7 @@ int main(int argc, char const *const *argv)
               "%3$*2$s -c {[sw]{left|right|up|down}|swipe}\n"
               "%3$*2$s -G fill=<geo>[<color>]\n"
               "%3$*2$s -G text=<X>x<Y>[<color>],<text>[,<font>]\n"
+              "%3$*2$s -G img={{<src-geo>'%%'}|{<dst-geo>'@'}|{<size>'#'}}*<fname>\n"
               "%3$*2$s -X [u]{app|mapp|desktop}[#<alpha>][@none|<color>]\n"
               "%3$*2$s -X {top|iconify|close|tasw|fullscreen|fs|ping}\n"
               "%3$*2$s -X {portrait|rotate|noncomp|nc}\n"
