@@ -473,9 +473,6 @@
  *     Unmap the tapped client window.
  *   * map -m rtcom-call-ui
  *     Remap Phone's topmost window.
- *   * map -k ctrl-BackSpace
- *   * map -X tasw
- *     Go to task switcher.
  *   * map -C win=top _NET_WM_STATE=2,_NET_WM_STATE_FULLSCREEN
  *   * map -X fs
  *     Fullscreen or unfullscreen the current application.
@@ -512,6 +509,9 @@
  *     Fun!
  *
  * Hildon-specific examples:
+ *   * map -k ctrl-BackSpace
+ *   * map -X tasw
+ *     Go to task switcher.
  *   * map -tI request=1 -W loop
  *     On tap switch to portrait mode and back.
  *   * map -Ti nc=1 top
@@ -760,8 +760,8 @@ static int Verbose, Is_interactive;
 /* Private functions */
 static void __attribute__((noreturn)) die(char const *msg)
 {
-    fputs(msg, stderr);
-    exit(1);
+  fputs(msg, stderr);
+  exit(1);
 } /* die */
 
 #ifndef __cplusplus
@@ -769,7 +769,7 @@ static void *xmalloc(void *ptrp, size_t size)
 {
   void *ptr;
   if (!(ptr = malloc(size)))
-    die("Out of memory\n");
+    die("out of memory\n");
   return *(void **)ptrp = ptr;
 } /* xmalloc */
 
@@ -777,7 +777,7 @@ static void *xrealloc(void *ptrp, size_t size)
 {
   void *ptr;
   if (!(ptr = realloc(*(void **)ptrp, size)))
-    die("Out of memory\n");
+    die("out of memory\n");
   memcpy(ptrp, &ptr, sizeof(ptr));
   return ptr;
 } /* xrealloc */
@@ -786,7 +786,7 @@ template<typename T>
 static T xmalloc(T *ptrp, unsigned size)
 {
   if (!(*ptrp = (T)malloc(size)))
-    die("Out of memory\n");
+    die("out of memory\n");
   return *ptrp;
 } /* xmalloc */
 
@@ -794,7 +794,7 @@ template<typename T>
 static T xrealloc(T *ptrp, unsigned size)
 {
   if (!(*ptrp = (T)realloc(*ptrp, size)))
-    die("Out of memory\n");
+    die("out of memory\n");
   return *ptrp;
 } /* xrealloc */
 #endif /* __cplusplus */
@@ -1151,7 +1151,7 @@ static char const *get_optarg(char const *str,
           }
         if (lenp)
           (*lenp)++;
-      } /* for */
+      } /* until $endc is found */
 
     if (!endc)
       /* We've reached the end of the string, no more arguments. */
@@ -2955,7 +2955,7 @@ static void open_image(struct image_st *img, char const *fname,
     }
 #endif /* ! HAVE_GDK_PIXBUF && ! HAVE_QT */
   if (!(img->st = fopen(fname, "w")))
-    die("couldn't open output file\n");
+    die("couldn't open output image\n");
   printf("convert -size %ux%u -depth 8 %s:'%s' '%s.png';\n",
          width, height, has_alpha ? "rgba" : "rgb",
          fname, fname);
@@ -3061,7 +3061,7 @@ static void close_image(struct image_st *img)
 
   /* Written a plain file. */
   if (fclose(img->st))
-    die("write error\n");
+      die("write error\n");
 } /* close_image */
 
 /* Convert an XImage::data-like byte array to plain RGB888 and write it
@@ -3144,6 +3144,7 @@ static rgb_st yuv2rgb(int y, int u, int v)
                0xff);
 } /* yuv2rgb */
 
+/* Save $img Y'UV -> $fname RGB. */
 static void save_yuv_image(char const *fname, unsigned char const *img,
                            unsigned row, unsigned width, unsigned height)
 {
