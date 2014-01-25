@@ -1407,33 +1407,42 @@ static char const *get_xpos(char const *p, XPoint *xpos)
   return get_point(p, &xpos->x, &xpos->y, NULL, True);
 } /* get_xpos */
 
-/* Get a <geo>.  See the user documentation for examples. */
-static char const *get_geometry(char const *str, XRectangle *geo)
+/* Get a <size>. */
+static char const *get_size(char const *str,
+                            unsigned short *widthp, unsigned short *heightp)
 {
-  char const *p1, *pp, *origin;
-
   if (str[0] == 'F' && str[1] == 'S')
     { /* Entire display. */
-      geo->x = geo->y = 0;
-      geo->width  = DpyWidth;
-      geo->height = DpyHeight;
+      *widthp  = DpyWidth;
+      *heightp = DpyHeight;
       return str + 2;
     }
   else if (str[0] == 'f' && str[1] == 's')
     { /* Default size ($DfltWidth x $DfltHeight) */
-      geo->x = geo->y = 0;
-      geo->width  = DfltWidth;
-      geo->height = DfltHeight;
+      *widthp  = DfltWidth;
+      *heightp = DfltHeight;
       return str + 2;
     }
+  else
+    return get_dims_or_coords(str, (short *)widthp, (short *)heightp,
+                              True, True, True);
+}
 
-  if (!(p1 = get_dims_or_coords(str,
-                                (short*)&geo->width, (short*)&geo->height,
-                                True, True, True)))
-    die("invalid geometry\n");
+/* Get a <geo>.  See the user documentation for examples. */
+static char const *get_geometry_nok(char const *str, XRectangle *geo)
+{
+  char const *p1, *pp, *origin;
+
+  if (!(p1 = get_size(str, &geo->width, &geo->height)))
+    {
+      geo->width = geo->height = 0;
+      return NULL;
+    }
+
   if (!(pp = get_point(p1, &geo->x, &geo->y, &origin, False)))
     { /* Recognize {<dim>x<rel>}{<off><coord>} (eg. 100x0.5+10+0.5). */
       short w2, h2;
+
       if ((pp = get_dims_or_coords(str, &w2, &h2, True, False, True)) != NULL
           && (pp = get_point(pp, &geo->x, &geo->y, &origin, False)) != NULL)
         { /* Yes, the alternative parsing was successful. */
@@ -1461,6 +1470,14 @@ static char const *get_geometry(char const *str, XRectangle *geo)
 
   assert(pp != NULL);
   return pp;
+} /* get_geometry_nok */
+
+/* Get a <geo> and die on parse error. */
+static char const *get_geometry(char const *str, XRectangle *geo)
+{
+  if (!(str = get_geometry_nok(str, geo)))
+    die("invalid geometry\n");
+  return str;
 } /* get_geometry */
 
 /* Resolve $str as a color name. */
@@ -4902,12 +4919,11 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
               valmask = 0;
               if ((cmd = isprefix(optarg, "dflt=")) != NULL)
                 {   /* Set the default size. */
-                  short w, h;
                   char const *p;
+                  unsigned short w, h;
 
                   if (!isprefix(cmd, "0x")
-                      && (p = get_dims_or_coords(cmd, &w, &h,
-                                                 True, True, True)) != NULL)
+                      && (p = get_size(cmd, &w, &h)) != NULL)
                     { /* dflt=<size> */
                       cmd = p;
                       DfltWidth = w;
