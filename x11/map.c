@@ -355,7 +355,7 @@
  *                      Make <window>'s size the default.
  * -G text=<X>x<Y>[<color>],<text>[,<font>]
  *                      Draw on the window (or pixmap or other drawable).
- * -G img={{<src-geo> '%'} | {<dst-geo> '@'} | {<size> '#'}}* <fname>
+ * -G img={{<src-geo> '%'} | {<dst-geo> '@'} | {<size> '#'}}* ['!'] <fname>
  *                      Take the <src-geo> rectangle of the image <fname>,
  *                      and plot it onto the <dst-geo> rectangle of the
  *                      <window>, scaling the image as necessary.  The image
@@ -369,7 +369,9 @@
  *                      and to the size of the image).  You can use "fs"
  *                      for example to scale the image to the full size
  *                      of the <window>.  Other expressioons of <geometry>
- *                      are understood as well.
+ *                      are understood as well.  The <fname> can be prefixed
+ *                      with a '|' character in case it contains [%@#|]
+ *                      characters.
  * -X [u]app[{@none|<color>}]
  *                      Creates a simple maximized application window.
  *                      If prefixed with 'u' you'll have to map it explicitly.
@@ -524,10 +526,12 @@
  *     Load the image, scale it to 200x200 pixels and plot it on the newborn.
  *     (Either a toolkit or Xrender is required for scaling.)
  *   * map -G img=1cmx1cm%fs@Christi.jpg
- *     Take the top-left 1x1cm rectangle of Christi.jpg and project it onto
- *     the new window.  Note relative geometries (ie. those that depend on
- *     the default size) are not really useful in front of '%', because it's
- *     NOT relative to the image's natural size.
+ *     Take the top-left 1cm x 1cm rectangle of Christi.jpg and project it
+ *     onto the new window.
+ *   * map -G img=1cmx1cm+0+0cc%fs@Christi.jpg
+ *     Likewise, but take the central 1cm x 1cm rectangle.
+ *   * map -G 'img=|FNameWithWeirdCharacters!@#$%^&*.png'
+ *     A preceding '|' character signifies the start of the image file name.
  *   * map -G 'img=300x300#me.rgb'
  *     This is how to draw a raw RGB/RGBA image.
  *   * map -c cc
@@ -1469,15 +1473,12 @@ static char const *get_size(char const *str,
 }
 
 /* Get a <geo>.  See the user documentation for examples. */
-static char const *get_geometry_nok(char const *str, XRectangle *geo)
+static char const *get_geometry(char const *str, XRectangle *geo)
 {
   char const *p1, *pp, *origin;
 
   if (!(p1 = get_size(str, &geo->width, &geo->height)))
-    {
-      geo->width = geo->height = 0;
-      return NULL;
-    }
+    die("Invalid geometry");
 
   if (!(pp = get_point(p1, &geo->x, &geo->y, &origin, False)))
     { /* Recognize {<dim>x<rel>}{<off><coord>} (eg. 100x0.5+10+0.5). */
@@ -1510,14 +1511,6 @@ static char const *get_geometry_nok(char const *str, XRectangle *geo)
 
   assert(pp != NULL);
   return pp;
-} /* get_geometry_nok */
-
-/* Get a <geo> and die on parse error. */
-static char const *get_geometry(char const *str, XRectangle *geo)
-{
-  if (!(str = get_geometry_nok(str, geo)))
-    die("Invalid geometry");
-  return str;
 } /* get_geometry */
 
 /* Resolve $str as a color name. */
@@ -3256,12 +3249,33 @@ static void save_yuv_image(char const *fname, unsigned char const *img,
  * Deduce $src->width and $src->height from $orig_w and $orig_h,
  * and $dst->width and $dst->height from $src if they're missing (zero).
  * Returns whether $src is NOT equivalent to ${orig_w}x${orig_h}+0+0,
- * ie. when the source rectangle is not a continuouos byte array.
+ * ie. when the source rectangle is not a continuous byte array.
  */
-static Bool determine_image_rectangles(XRectangle *src, XRectangle *dst,
-                                       int orig_w, int orig_h)
+static Bool determine_image_rectangles(
+                                 char const *srcstr, char const *srcstrend,
+                                 XRectangle *src, XRectangle *dst,
+                                 int orig_w, int orig_h)
 {
   assert(orig_w > 0 && orig_h > 0);
+
+  /* $srcstr -> $src if given */
+  if (srcstr)
+    {
+      unsigned dflt_width, dflt_height;
+
+      /* Replace the default size with $orig_w x $orig_h temporarily,
+       * so relative source geometries will be correctly parsed. */
+      dflt_width = DfltWidth;
+      dflt_height = DfltHeight;
+      DfltWidth = orig_w;
+      DfltHeight = orig_h;
+      if (get_geometry(srcstr, src) != srcstrend)
+        die("Junk after source rectangle");
+      DfltWidth = dflt_width;
+      DfltHeight = dflt_height;
+    }
+  else
+    memset(src, 0, sizeof(*src));
 
   /* Deduce $src->width, making sure that $src is contained within
    * $orig_w x $orig_height. */
@@ -3453,18 +3467,24 @@ static XFixed fixdiv(XFixed up, XFixed down)
 } /* fixdiv */
 #endif /* HAVE_XRENDER */
 
-/* Take the $src rectangle of the ${orix_w}x${orig_h} image in $fname,
+/*
+ * Take the source rectangle of the ${orix_w}x${orig_h} image in $fname,
  * and project it onto the $dst rectangle of $drw.  If $drw is None,
- * a new Pixmap will be created and returned. */
+ * a new Pixmap will be created and returned.  The source rectangle is
+ * specified in $srcstr, which if not NULL, has to be a proper <geometry>
+ * ending at $srcstrend.
+ */
 static Drawable plot_image_with_x11(Drawable drw, GC gc,
                                     XWindowAttributes const *attrs,
                                     char const *fname,
                                     unsigned orig_w, unsigned orig_h,
-                                    XRectangle *src, XRectangle *dst)
+                                    char const *srcstr, char const *srcstrend,
+                                    XRectangle *dst)
 {
   char *dstp;
   off_t fsize;
   XImage *ximg;
+  XRectangle src;
   char const *srcp;
   Drawable __attribute__((unused)) final;
   Bool has_alpha, add_alpha, need_to_scale;
@@ -3474,19 +3494,19 @@ static Drawable plot_image_with_x11(Drawable drw, GC gc,
   srcp = (char const *)mmap_rgb(fname, &fsize, &has_alpha, orig_w, orig_h);
 
   /* $srcp -> $dstp */
-  determine_image_rectangles(src, dst, orig_w, orig_h);
-  dstp = read_ximage_pixels(srcp, has_alpha, orig_w, orig_h, src);
+  determine_image_rectangles(srcstr, srcstrend, &src, dst, orig_w, orig_h);
+  dstp = read_ximage_pixels(srcp, has_alpha, orig_w, orig_h, &src);
   munmap((void *)srcp, fsize);
 
   /* $dstp -> $ximg */
   add_alpha = visual_has_alpha(attrs);
-  ximg = mkximg(attrs->visual, add_alpha, src->width, src->height, dstp);
+  ximg = mkximg(attrs->visual, add_alpha, src.width, src.height, dstp);
 
   /* If @need_to_scale, replace $drw with a temporary pixmap. */
   final = drw;
-  need_to_scale = dst->width != src->width || dst->height != src->height;
+  need_to_scale = dst->width != src.width || dst->height != src.height;
   if (drw == None || need_to_scale)
-    drw = XCreatePixmap(Dpy, Root, src->width, src->height, attrs->depth);
+    drw = XCreatePixmap(Dpy, Root, src.width, src.height, attrs->depth);
 
   if (!need_to_scale)
     { /* $ximg -> $drw straightly */
@@ -3506,7 +3526,7 @@ static Drawable plot_image_with_x11(Drawable drw, GC gc,
       /* $ximg -> $drw */
       XPutImage(Dpy, drw, gc, ximg,
                 /* src_x, src_y, dst_x, dst_y, dst_w, dst_h */
-                0, 0, 0, 0, src->width, src->height);
+                0, 0, 0, 0, src.width, src.height);
       XDestroyImage(ximg);
 
       /* $drw -> $drw_pic */
@@ -3522,8 +3542,8 @@ static Drawable plot_image_with_x11(Drawable drw, GC gc,
        * 0       0       1
        */
       memset(&transform, 0, sizeof(transform));
-      transform.matrix[0][0] = fixdiv(src->width, dst->width);
-      transform.matrix[1][1] = fixdiv(src->height, dst->height);
+      transform.matrix[0][0] = fixdiv(src.width, dst->width);
+      transform.matrix[1][1] = fixdiv(src.height, dst->height);
       transform.matrix[2][2] = 1 << 16; /* == 1 in XFixed */
       XRenderSetPictureTransform(Dpy, drw_pic, &transform);
       XRenderSetPictureFilter(Dpy, drw_pic, "best", NULL, 0);
@@ -3598,10 +3618,12 @@ static Drawable plot_image_with_gdk(Drawable drw, GC gc,
                                     XWindowAttributes const *attrs,
                                     char const *fname,
                                     unsigned orig_w, unsigned orig_h,
-                                    XRectangle *src, XRectangle *dst)
+                                    char const *srcstr, char const *srcstrend,
+                                    XRectangle *dst)
 {
   XImage *ximg;
   guchar *srcp;
+  XRectangle src;
   GdkPixbuf *pixbuf;
   char *dstp, *row, *col;
   unsigned nch, irs, ors;
@@ -3615,22 +3637,23 @@ static Drawable plot_image_with_gdk(Drawable drw, GC gc,
 
       /* $fname -> $srcp */
       assert(orig_h > 0);
-      needs_to_crop = determine_image_rectangles(src, dst, orig_w, orig_h);
+      needs_to_crop = determine_image_rectangles(srcstr, srcstrend, &src,
+                                                 dst, orig_w, orig_h);
       srcp = (guchar *)mmap_rgb(fname, &fsize, &has_alpha, orig_w, orig_h);
-      irs = (has_alpha ? 4 : 3) * src->width;
+      irs = (has_alpha ? 4 : 3) * src.width;
 
       g_type_init();
       if (needs_to_crop)
         { /* $srcp -> $dstp -> $pixbuf */
           dstp = read_gdk_pixels((const char *)srcp, has_alpha,
-                                 orig_w, orig_h, src);
+                                 orig_w, orig_h, &src);
           munmap(srcp, fsize);
           srcp = NULL;
 
           pixbuf = gdk_pixbuf_new_from_data((guchar const *)dstp,
                                             GDK_COLORSPACE_RGB, has_alpha,
                                             X11_BITS_PER_CHANNEL,
-                                            src->width, src->height, irs,
+                                            src.width, src.height, irs,
                                             NULL, NULL);
         }
       else
@@ -3639,7 +3662,7 @@ static Drawable plot_image_with_gdk(Drawable drw, GC gc,
           pixbuf = gdk_pixbuf_new_from_data(srcp,
                                             GDK_COLORSPACE_RGB, has_alpha,
                                             X11_BITS_PER_CHANNEL,
-                                            src->width, src->height, irs,
+                                            src.width, src.height, irs,
                                             NULL, NULL);
         }
 
@@ -3651,9 +3674,7 @@ static Drawable plot_image_with_gdk(Drawable drw, GC gc,
         munmap(srcp, fsize);
       free(dstp);
     }
-  else if (!src->x && !src->y
-           && !src->width && !src->height
-           && (dst->width || dst->height))
+  else if (!srcstr && (dst->width || dst->height))
     { /* Not RGB, no cropping, just scale. */
       GError *err;
 
@@ -3679,21 +3700,20 @@ static Drawable plot_image_with_gdk(Drawable drw, GC gc,
         die(err->message);
 
       /* Crop $pixbuf if necessary. */
-      if (determine_image_rectangles(src, dst,
+      if (determine_image_rectangles(srcstr, srcstrend, &src, dst,
                                      gdk_pixbuf_get_width(pixbuf),
                                      gdk_pixbuf_get_height(pixbuf)))
         {
           GdkPixbuf *cropped;
 
-          cropped = gdk_pixbuf_new_subpixbuf(pixbuf,
-                                             src->x, src->y,
-                                             src->width, src->height);
+          cropped = gdk_pixbuf_new_subpixbuf(pixbuf, src.x, src.y,
+                                             src.width, src.height);
           gdk_pixbuf_unref(pixbuf);
           pixbuf = cropped;
         }
 
       /* Scale $pixbuf if necessary. */
-      if (dst->width != src->width || dst->height != src->height)
+      if (dst->width != src.width || dst->height != src.height)
               pixbuf = scale_gdk(pixbuf, dst);
     } /* get $pixbuf */
 
@@ -3717,7 +3737,6 @@ static Drawable plot_image_with_gdk(Drawable drw, GC gc,
   xmalloc(&dstp, ors * dst->height);
 
   /* Convert $srcp (RGB[A]) -> $dstp (BGR[A]). */
-  printf("%d %d\n", has_alpha, add_alpha);
   for (row = dstp; row < &dstp[ors * dst->height]; row += ors)
     {
       for (col = row; col < &row[ors]; srcp += nch)
@@ -3837,10 +3856,12 @@ static Drawable plot_image_with_qt(Drawable drw, GC gc,
                                    XWindowAttributes const *attrs,
                                    char const *fname,
                                    unsigned orig_w, unsigned orig_h,
-                                   XRectangle *src, XRectangle *dst)
+                                   char const *srcstr, char const *srcstrend,
+                                   XRectangle *dst)
 {
   QImage qimg;
   XImage *ximg;
+  XRectangle src;
   unsigned char *data;
 
   /* Get $qimg at $src->width x $src->height. */
@@ -3850,21 +3871,22 @@ static Drawable plot_image_with_qt(Drawable drw, GC gc,
       Bool has_alpha;
       unsigned const char *srcp;
 
-      determine_image_rectangles(src, dst, orig_w, orig_h);
+      determine_image_rectangles(srcstr, srcstrend, &src, dst,
+                                 orig_w, orig_h);
       srcp = (unsigned char const *)mmap_rgb(fname, &fsize, &has_alpha,
                                              orig_w, orig_h);
-      data = read_qimage_pixels(srcp, has_alpha, orig_w, orig_h, src);
+      data = read_qimage_pixels(srcp, has_alpha, orig_w, orig_h, &src);
       munmap((void *)srcp, fsize);
 
       /* $data will NOT be freed by $qimg. */
-      src->x = src->y = 0;
-      qimg = QImage(data, src->width, src->height, has_alpha
+      src.x = src.y = 0;
+      qimg = QImage(data, src.width, src.height, has_alpha
                     ? QImage::Format_ARGB32 : QImage::Format_RGB32);
     }
   else
     { /* not raw RGB, let QImage load it */
       if (!qimg.load(fname))
-        die("Invalid image");
+        die("Couldn't load image");
       data = NULL;
 
       /* Convert $qimg's internal representation into [A]RGB32,
@@ -3884,12 +3906,13 @@ static Drawable plot_image_with_qt(Drawable drw, GC gc,
         } /* switch image format */
 
       /* Crop $qimg if necessary. */
-      if (determine_image_rectangles(src, dst, qimg.width(), qimg.height()))
-        qimg = qimg.copy(src->x, src->y, src->width, src->height);
+      if (determine_image_rectangles(srcstr, srcstrend, &src, dst,
+                                     qimg.width(), qimg.height()))
+        qimg = qimg.copy(src.x, src.y, src.width, src.height);
     } /* get $qimg */
 
   /* Scale $qimg if necessary. */
-  if (dst->width != src->width || dst->height != src->height)
+  if (dst->width != src.width || dst->height != src.height)
     {
       qimg = qimg.scaled(dst->width, dst->height,
                          Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
@@ -3924,7 +3947,7 @@ static Drawable plot_image_with_qt(Drawable drw, GC gc,
 #endif /* HAVE_QT */
 
 /*
- * $str := {{<src-geo> '%'} | {<dst-geo> '@'} | {<size> '#'}}* <fname>
+ * $str := {{<src-geo> '%'} | {<dst-geo> '@'} | {<size> '#'}}* ['|'] <fname>
  * Take <src-geo> of <fname> (which, if a raw RGB[A] file, it's <size>
  * must be declared) and plot it onto $dst of $win, cropping and scaling
  * the image as necessary.
@@ -3932,9 +3955,9 @@ static Drawable plot_image_with_qt(Drawable drw, GC gc,
 static Drawable plot_image(char const *str, Window win, Bool set_bg)
 {
   Bool use_x11;
-  char const *p;
-  XRectangle src, dst;
+  XRectangle dst;
   unsigned short orig_w, orig_h;
+  char const *p, *srcstr, *srcstrend;
   GC gc;
   Drawable drw;
   Visual visual;
@@ -3943,33 +3966,40 @@ static Drawable plot_image(char const *str, Window win, Bool set_bg)
 
   /* Parse $str for $src, $dst, $orig_w and $orig_h. */
   orig_w = orig_h = 0;
-  memset(&src, 0, sizeof(src));
+  srcstr = srcstrend = NULL;
   memset(&dst, 0, sizeof(dst));
-  for (p = str; *p; p++)
+  for (p = str; ; p++)
     {
       if (*p == '%')
         { /* Do we have a $src here? */
           /*
-           * NOTE that this geometry is parsed relative to the default size
-           * (= $win's size), not that of the image (since we don't know its
-           * size yet).  Unfortunately this makes expressions like 100x100br
-           * rather useless.
+           * We can't parse the <geometry> just yet, because we don't know
+           * the image dimensions yet.  It'll be parsed by the appropriate
+           * plot_image_with_*() function when the image dimensions become
+           * known.
            */
-          if (get_geometry_nok(str, &src) != p)
-            break;
+          srcstr = str;
+          srcstrend = p;
         }
       else if (*p == '@')
         { /* $dst */
-          if (get_geometry_nok(str, &dst) != p)
-            break;
+          if (get_geometry(str, &dst) != p)
+            die("Junk after destination rectangle");
         }
       else if (*p == '#')
         { /* $orig_w, $orig_h */
           if (get_size(str, &orig_w, &orig_h) != p)
-            break;
+            die("Junk after image dimensions");
           else if (!orig_w || !orig_h)
-            die("Invalid size");
+            die("Invalid image dimensions");
         }
+      else if (*p == '|')
+        { /* Desination of input file name. */
+          str = ++p;
+          break;
+        }
+      else if (*p == '\0')
+        break;
       else
         continue;
 
@@ -3990,7 +4020,10 @@ static Drawable plot_image(char const *str, Window win, Bool set_bg)
 #ifndef HAVE_XRENDER
   if (use_x11)
     { /* XRender is required for scaling. */
-      determine_image_rectangles(&src, &dst, orig_w, orig_h);
+      XRectangle src;
+
+      determine_image_rectangles(srcstr, srcstrend, &src, &dst,
+                                 orig_w, orig_h);
       if (dst.width != src.width || dst.height != src.height)
         use_x11 = False;
     }
@@ -3998,14 +4031,14 @@ static Drawable plot_image(char const *str, Window win, Bool set_bg)
 
   if (use_x11)
     drw = plot_image_with_x11(drw, gc, &attrs, str,
-                              orig_w, orig_h, &src, &dst);
+                              orig_w, orig_h, srcstr, srcstrend, &dst);
   else
 #if defined(HAVE_GDK_PIXBUF)
     drw = plot_image_with_gdk(drw, gc, &attrs, str,
-                              orig_w, orig_h, &src, &dst);
+                              orig_w, orig_h, srcstr, srcstrend, &dst);
 #elif defined(HAVE_QT)
     drw = plot_image_with_qt(drw, gc, &attrs, str,
-                             orig_w, orig_h, &src, &dst);
+                              orig_w, orig_h, srcstr, srcstrend, &dst);
 #else /* ! HAVE_GDK_PIXBUF && ! HAVE_QT */
     die("Can't load or plot image");
 #endif
@@ -6218,7 +6251,7 @@ int main(int argc, char const *const *argv)
               "%3$*2$s -c {[sw]{left|right|up|down}|swipe}\n"
               "%3$*2$s -G fill=<geo>[<color>]\n"
               "%3$*2$s -G text=<X>x<Y>[<color>],<text>[,<font>]\n"
-              "%3$*2$s -G img={{<src-geo>'%%'}|{<dst-geo>'@'}|{<size>'#'}}*<fname>\n"
+              "%3$*2$s -G img={{<src-geo>'%%'}|{<dst-geo>'@'}|{<size>'#'}}*['|']<fname>\n"
               "%3$*2$s -X [u]{app|mapp|desktop}[#<alpha>][@none|<color>]\n"
               "%3$*2$s -X {top|iconify|close|tasw|fullscreen|fs|ping}\n"
               "%3$*2$s -X {portrait|rotate|noncomp|nc}\n"
