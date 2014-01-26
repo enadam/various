@@ -799,7 +799,8 @@ static int Verbose, Is_interactive;
 /* Private functions */
 static void __attribute__((noreturn)) die(char const *msg)
 {
-  fputs(msg, stderr);
+  fputs(msg ? msg : strerror(errno), stderr);
+  fputc('\n', stderr);
   exit(1);
 } /* die */
 
@@ -808,7 +809,7 @@ static void *xmalloc(void *ptrp, size_t size)
 {
   void *ptr;
   if (!(ptr = malloc(size)))
-    die("out of memory\n");
+    die(NULL);
   return *(void **)ptrp = ptr;
 } /* xmalloc */
 
@@ -816,7 +817,7 @@ static void *xrealloc(void *ptrp, size_t size)
 {
   void *ptr;
   if (!(ptr = realloc(*(void **)ptrp, size)))
-    die("out of memory\n");
+    die(NULL);
   memcpy(ptrp, &ptr, sizeof(ptr));
   return ptr;
 } /* xrealloc */
@@ -825,7 +826,7 @@ template<typename T>
 static T xmalloc(T *ptrp, unsigned size)
 {
   if (!(*ptrp = (T)malloc(size)))
-    die("out of memory\n");
+    die(NULL);
   return *ptrp;
 } /* xmalloc */
 
@@ -833,7 +834,7 @@ template<typename T>
 static T xrealloc(T *ptrp, unsigned size)
 {
   if (!(*ptrp = (T)realloc(*ptrp, size)))
-    die("out of memory\n");
+    die(NULL);
   return *ptrp;
 } /* xrealloc */
 #endif /* __cplusplus */
@@ -1100,7 +1101,7 @@ static char const *get_short_or_float(char const *p, short *np, float *fp)
 
   if ((p = get_int_or_float(p, &i, fp)) != NULL
       && *fp && (i < SHRT_MIN || SHRT_MAX < i))
-    die("integer value out of range\n");
+    die("Integer value out of range");
   *np = i;
   return p;
 } /* get_short_or_float */
@@ -1183,7 +1184,7 @@ static char const *get_optarg(char const *str,
         switch (*str++)
           {
           case '\0':
-            die("unterminated string\n");
+            die("Unterminated string");
           case ',':
             if (!endc)
               return str;
@@ -1229,7 +1230,7 @@ static unsigned get_int_list(long *list, unsigned max, char const *str)
   for (;;)
     {
       if (i >= max)
-        die("too many arguments\n");
+        die("Too many arguments");
       else if (!*str)
         break;
 
@@ -1273,7 +1274,7 @@ static char const *get_duration(char const *p, unsigned *msp, Bool isms)
   if (!(p = get_int_or_float(p, &n, &f)))
     return NULL;
   if (f < 0 || (!f && n < 0))
-    die("negative time\n");
+    die("Negative time");
 
   /* Does it denote seconds or milisecs? */
   if (p[0] == 'm' && p[1] == 's')
@@ -1515,7 +1516,7 @@ static char const *get_geometry_nok(char const *str, XRectangle *geo)
 static char const *get_geometry(char const *str, XRectangle *geo)
 {
   if (!(str = get_geometry_nok(str, geo)))
-    die("invalid geometry\n");
+    die("Invalid geometry");
   return str;
 } /* get_geometry */
 
@@ -1551,7 +1552,7 @@ static char const *get_color_by_name(Colormap cmap, char const *str,
           xcolor->blue  = rand();
         }
       else
-        die("unknown color\n");
+        die("Unknown color");
     }
 
   assert(XAllocColor(Dpy, cmap, xcolor));
@@ -1582,7 +1583,7 @@ static char const *get_xcolor(Colormap cmap, char const *str, XColor *xcolor)
       has_alpha = True;
       alpha = strtoul(str, (char **)&endp, 0);
       if (!(str < endp))
-        die("missing alpha from color specification\n");
+        die("Missing alpha from color specification");
       str = endp;
     }
 
@@ -1612,13 +1613,13 @@ static char const *get_xcolor(Colormap cmap, char const *str, XColor *xcolor)
     {
       if (has_alpha)
         /* We already had a '#' or '%'. */
-        die("double alpha in color specification\n");
+        die("Double alpha in color specification");
 
       str++;
       has_alpha = True;
       alpha = strtoul(str, (char **)&endp, 0);
       if (!(str < endp))
-        die("missing alpha from color specification\n");
+        die("Missing alpha from color specification");
       str = endp;
     }
 
@@ -1876,7 +1877,7 @@ static Window find_topmost(void)
 
   top = Root;
   if (!find_client_window(&top, NULL, NULL))
-    die("no topmost window\n");
+    die("No topmost window");
   return top;
 } /* find_topmost */
 
@@ -1938,7 +1939,7 @@ static Window choose_window(char const *str)
   else if (!strcmp(str, "wm"))
     {
       if (!(win = find_wm_window()))
-        die("no window manager running\n");
+        die("No window manager running");
     }
   else if (!strcmp(str, "top"))
     win = find_topmost();
@@ -1946,7 +1947,7 @@ static Window choose_window(char const *str)
     {
       win = Root;
       if (!find_client_window(&win, NULL, &str[4]))
-        die("no such window\n");
+        die("No such window");
     }
   else
     { /* Either an XID or a window name. */
@@ -1955,7 +1956,7 @@ static Window choose_window(char const *str)
         {
           win = Root;
           if (!find_client_window(&win, str, NULL))
-            die("no such window\n");
+            die("No such window");
         }
       else if (win == 0)
         win = Root;
@@ -1981,7 +1982,7 @@ must_choose_window(char const *str)
   Window win;
 
   if (!(win = choose_window(str)))
-      die("you have to choose a window\n");
+      die("Window must be chosen");
   return win;
 } /* must_choose_window */
 
@@ -2048,7 +2049,7 @@ static Bool get_win_attrs(Drawable win, XWindowAttributes *attrs,
   if (!(error = untrap_xerrors()))
     return True;
   if (error == BadWindow)
-    die("window does not exist\n");
+    die("Window doesn't exist");
 
   /* $win is a pixmap. */
   assert(error == BadMatch);
@@ -2845,15 +2846,15 @@ static char *fname_template(char const *str)
             { /* Always print as many digits as the counter
                * can maximally have. */
               if (minwidth < 1)
-                die("bad prec\n");
+                die("Zero precision");
               lout += digitsof(minwidth-1);
             }
           else
-            die("syntax error\n");
+            die("Syntax error");
         } else if (*in == '%')
           lout++;
       else
-        die("syntax error\n");
+        die("Syntax error");
 
       /* Skip as many characters as we've parsed. */
       in += i;
@@ -3018,7 +3019,7 @@ static void open_image(struct image_st *img, char const *fname,
       img->writer = NULL;
     }
   else
-    die("cannot write image\n");
+    die("Failed to write image");
 #endif /* HAVE_QT */
 
   /* Write straight RGB.  If this is the only format we support (because of
@@ -3032,7 +3033,7 @@ static void open_image(struct image_st *img, char const *fname,
     }
 #endif /* ! HAVE_GDK_PIXBUF && ! HAVE_QT */
   if (!(img->st = fopen(fname, "w")))
-    die("couldn't open output image\n");
+    die(NULL);
   printf("convert -size %ux%u -depth 8 %s:'%s' '%s.png';\n",
          width, height, has_alpha ? "rgba" : "rgb",
          fname, fname);
@@ -3118,7 +3119,7 @@ static void close_image(struct image_st *img)
   if (img->pixbuf)
     {
       if (!gdk_pixbuf_save(img->pixbuf, img->fname, img->fmt, NULL, NULL))
-        die("failed to save image\n");
+        die("Failed to save image");
       gdk_pixbuf_unref(img->pixbuf);
       free(img->tfname);
       return;
@@ -3129,7 +3130,7 @@ static void close_image(struct image_st *img)
   if (img->qimg)
     {
       if (!img->writer->write(*img->qimg))
-        die("failed to save image\n");
+        die("Failed to save image");
       delete img->qimg;
       delete img->writer;
       return;
@@ -3138,7 +3139,7 @@ static void close_image(struct image_st *img)
 
   /* Written a plain file. */
   if (fclose(img->st))
-      die("write error\n");
+      die(NULL);
 } /* close_image */
 
 /* Convert an XImage::data-like byte array to plain RGB888 and write it
@@ -3267,19 +3268,19 @@ static Bool determine_image_rectangles(XRectangle *src, XRectangle *dst,
   if (!src->width)
     {
       if (src->x >= orig_w)
-        die("X offset of the source rectangle is too large\n");
+        die("X offset of the source rectangle is too large");
       src->width = orig_w - src->x;
     } else if (src->x + src->width > orig_w)
-      die("source rectangle is too wide\n");
+      die("Source rectangle is too wide");
 
   /* Determine/verify $src->height. */
   if (!src->height)
     {
       if (src->y >= orig_h)
-        die("Y offset of the source rectangle is too large\n");
+        die("Y offset of the source rectangle is too large");
       src->height = orig_h - src->y;
     } else if (src->y + src->height > orig_h)
-      die("height of the source rectangle is too high\n");
+      die("Height of the source rectangle is too high");
 
   /* Set $dst->width and height if not specified. */
   if (!dst->width)
@@ -3305,7 +3306,7 @@ static void *mmap_rgb(char const *fname, off_t *fsizep, Bool *alphap,
   struct stat sbuf;
 
   if ((fd = open(fname, O_RDONLY)) < 0)
-    die("couldn't open input image\n");
+    die(NULL);
 
   /* Is it an RGB or an RGBA image? */
   assert(fstat(fd, &sbuf) == 0);
@@ -3314,7 +3315,7 @@ static void *mmap_rgb(char const *fname, off_t *fsizep, Bool *alphap,
   else if (sbuf.st_size == (off_t)(4 * orig_w * orig_h))
     *alphap = True;
   else
-    die("RGB image has invalid size\n");
+    die("RGB image has invalid size");
 
   /* It's OK to close($fd) having mmap()ped it successfully. */
   ptr = (char *)mmap(NULL, sbuf.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
@@ -3542,7 +3543,7 @@ static Drawable plot_image_with_x11(Drawable drw, GC gc,
       return final;
     }
 #else /* ! HAVE_XRENDER */
-  die("can't scale image\n");
+  die("Can't scale image");
 #endif /* ! HAVE_XRENDER */
 } /* plot_image_with_x11 */
 
@@ -3863,7 +3864,7 @@ static Drawable plot_image_with_qt(Drawable drw, GC gc,
   else
     { /* not raw RGB, let QImage load it */
       if (!qimg.load(fname))
-        die("invalid image");
+        die("Invalid image");
       data = NULL;
 
       /* Convert $qimg's internal representation into [A]RGB32,
@@ -3871,7 +3872,7 @@ static Drawable plot_image_with_qt(Drawable drw, GC gc,
       switch (qimg.format())
         {
           case QImage::Format_Invalid:
-            die("invalid format");
+            die("Invalid format");
           case QImage::Format_RGB32:
           case QImage::Format_ARGB32:
             break;
@@ -3967,7 +3968,7 @@ static Drawable plot_image(char const *str, Window win, Bool set_bg)
           if (get_size(str, &orig_w, &orig_h) != p)
             break;
           else if (!orig_w || !orig_h)
-            die("invalid size\n");
+            die("Invalid size");
         }
       else
         continue;
@@ -3978,7 +3979,7 @@ static Drawable plot_image(char const *str, Window win, Bool set_bg)
 
   /* $str should be <fname>. */
   if (!*str)
-    die("no input\n");
+    die("No input file name");
 
   get_win_attrs(win, &attrs, True, &visual);
   gc = XCreateGC(Dpy, win, 0, &gcvals);
@@ -4006,7 +4007,7 @@ static Drawable plot_image(char const *str, Window win, Bool set_bg)
     drw = plot_image_with_qt(drw, gc, &attrs, str,
                              orig_w, orig_h, &src, &dst);
 #else /* ! HAVE_GDK_PIXBUF && ! HAVE_QT */
-    die("can't load or plot image\n");
+    die("Can't load or plot image");
 #endif
 
   XFreeGC(Dpy, gc);
@@ -4054,7 +4055,7 @@ static char *get_properties(Atom win, Atom key, Atom type,
     return NULL;
 
   if (rtype != type)
-    die("property has a different type\n");
+    die("Property has a different type");
   assert(rfmt == 8 || rfmt == 16 || rfmt == 32);
   *widthp = rfmt/8;
   *nvalsp = n;
@@ -4481,7 +4482,7 @@ static void pointer_event(Window win,
             XTestFakeButtonEvent(Dpy, Button1, False, delay);
         }
 #else /* ! HAVE_XTST */
-      die("no xtst\n");
+      die("Feature not available");
 #endif
     }
   else
@@ -4600,7 +4601,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
             else if (!strcmp(optarg, "flip"))
               propcmd = FLIP;
             else
-              die("unknown property command\n");
+              die("Unknown property command");
             continue;
 
           /* Don't let -Q affect an immediately preceeding -p. */
@@ -4660,7 +4661,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                     attrs.height = intersect(&y, attrs.y, attrs.height,
                                              DpyHeight);
                     if (!attrs.width || !attrs.height)
-                      die("window is out of screen\n");
+                      die("Window out of screen");
                     attrs.x -= x;
                     attrs.y -= y;
                   }
@@ -4732,7 +4733,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                         break;
 # endif /* HAVE_OMAPFB */
                       default:
-                        die("unknown pixel data format\n");
+                        die("Unknown pixel data format");
                       }
 #else /* ! HAVE_FB */
                     /* Fuck knows, assume RGB565. */
@@ -4859,9 +4860,9 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   } /* for all shm:s */
 
                 if (!img)
-                  die("couldn't find any good shm\n");
+                  die("Couldn't find appropriate shm");
 #else
-                die("feature not available\n");
+                die("Feature not available");
 #endif
               }
             break;
@@ -4922,7 +4923,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   else if (color[0] == '#' || color[0] == '%')
                     depth = 32;
                   else
-                    die("invalid color specification\n");
+                    die("Invalid color specification");
 
                   /* Create a TrueColor colormap if necessary. */
                   if (depth == 32)
@@ -4941,7 +4942,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   /* Get the background color pixel value. */
                   if (*get_color_pixel(attrs.colormap, color,
                                        &attrs.background_pixel) != '\0')
-                    die("junk after color specification\n");
+                    die("Junk after color specification");
                   flags |= CWBackPixel;
 
                   /* A border color has to be specified too if the visuals
@@ -5062,7 +5063,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                       else if (*optarg == '/')
                         setop = SUBTRACT;
                       else
-                        die("unknown set operation\n");
+                        die("Unknown set operation");
                       optarg++;
                     }
 
@@ -5071,13 +5072,13 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   XFixesSetWindowShapeRegion(Dpy, win, kind, 0, 0, region);
                   XFixesDestroyRegion(Dpy, region);
 #else /* ! HAVE_XFIXES */
-                  die("feature not available\n");
+                  die("Feature not available");
 #endif
                 }
               else
                 { /* Resize and/or relocate the window. */
                   if (*get_geometry(optarg, &rect))
-                    die("junk after geometry specification\n");
+                    die("Junk after geometry specification");
                   XMoveResizeWindow(Dpy, win,
                                    rect.x, rect.y,
                                    rect.width, rect.height);
@@ -5135,7 +5136,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
               else if (!strcmp(optarg, "none"))
                 revert = RevertToNone;
               else
-                die("where to revert the focus if the window is gone?\n");
+                die("Where to revert the focus if the window is gone?");
               XSetInputFocus(Dpy, win, revert, CurrentTime);
             }
 
@@ -5192,7 +5193,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   else if (!strcmp(p, "unobscured"))
                     ev.xvisibility.state = VisibilityUnobscured;
                   else
-                    die("unknown visibility\n");
+                    die("Unknown visibility");
 
                   ev.type = VisibilityNotify;
                   XSendEvent(Dpy, win, False, VisibilityChangeMask, &ev);
@@ -5212,7 +5213,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   XSendEvent(Dpy, win, False, PropertyChangeMask, &ev);
                 }
               else
-                die("unknown event\n");
+                die("Unknown event");
               break;
             }
 
@@ -5364,7 +5365,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   else if (!strcmp(opt, "nofs"))
                     fs = !set;
                   else
-                    die("unknown flag\n");
+                    die("Unknown flag");
 
                   free(dup);
                 }
@@ -5407,7 +5408,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                            XA_ATOM, &afs, 1, PropModeReplace);
                     }
                   else
-                    die("can't unfullscreen an unmanaged window\n");
+                    die("Can't unfullscreen an unmanaged window");
                 }
               break;
             }
@@ -5515,7 +5516,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   for (sym[1] = '\0'; (sym[0] = *str) != '\0'; str++)
                     {
                       if ((keysym = XStringToKeysym(sym)) == NoSymbol)
-                        die("unknown keysym\n");
+                        die("Unknown keysym");
                       keycode = XKeysymToKeycode(Dpy, keysym);
                       XTestFakeKeyEvent(Dpy, keycode, True, CurrentTime);
                       XTestFakeKeyEvent(Dpy, keycode, False, delay);
@@ -5608,9 +5609,9 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   /* Get the coordinate to move to, or where to begin. */
                   old = mew;
                   if (!(p = get_xpos(p, &mew)))
-                    die("invalid coordinates\n");
+                    die("Invalid coordinates");
                   if (mew.x < 0 || mew.y < 0)
-                    die("negative coordinate\n");
+                    die("Negative coordinate");
 
                   /* How long to keep the button pressed? */
                   if (!pressed && !*p)
@@ -5618,7 +5619,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   else if (*p != '@')
                     clicktime = 0;
                   else if (!(p = get_duration(p+1, &clicktime, True)))
-                    die("invalid time specification\n");
+                    die("Invalid time specification");
 
                   if (pressed)
                     { /* Move $old->$mew smoothly */
@@ -5710,7 +5711,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   if (*p == '!')
                     { /* Don't release. */
                       if (*++p != '\0')
-                        die("junk after bang\n");
+                        die("Junk after bang");
                       break;
                     }
                   else if (!*p)
@@ -5738,7 +5739,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                     }
 
                   if (*p++ != ',')
-                    die("junk after coordinate specification\n");
+                    die("Junk after coordinate specification");
                 } /* until end of string */
               break;
             }
@@ -5806,7 +5807,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
 
                   /* Position */
                   if (!(cmd = get_xpos(cmd, &p)))
-                    die("invalid coordinates\n");
+                    die("Invalid coordinates");
 
                   /* Color */
                   if (strspn(cmd, "@%#"))
@@ -5821,11 +5822,11 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
 
                   /* Text */
                   if (*cmd++ != ',')
-                    die("where is the text?\n");
+                    die("What to print?");
                   if (!(cmd = get_optarg(cmd,
                                          (char const **)&text.chars,
                                          (size_t *)&text.nchars)))
-                    die("text expected\n");
+                    die("Text expected");
 
                   /* Font */
                   if (*cmd)
@@ -5833,9 +5834,9 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                       char const *font;
 
                       if (!(cmd = get_optarg(cmd, &font, NULL)))
-                        die("font expected\n");
+                        die("Font name expected");
                       if ((text.font = XLoadFont(Dpy, font)) == None)
-                        die("font not found\n");
+                        die("Unknown font");
                     }
                   else
                     text.font = None;
@@ -5859,7 +5860,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
 
                   /* Position */
                   if (!(cmd = get_xpos(cmd, &p)))
-                    die("invalid coordinates\n");
+                    die("Invalid coordinates");
 
                   /* Color */
                   if (strspn(cmd, "@%#"))
@@ -5881,9 +5882,9 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
 
                   /* Text */
                   if (*cmd++ != ',')
-                    die("where is the text?\n");
+                    die("What to print?");
                   if (!(cmd = get_optarg(cmd, &text, &ltext)))
-                    die("text expected\n");
+                    die("Text expected");
 
                   /* Font */
                   if (*cmd)
@@ -5891,9 +5892,9 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                       char const *name;
 
                       if (!(cmd = get_optarg(cmd, &name, NULL)))
-                        die("font expected\n");
+                        die("Font name expected");
                       if (!(font = XftFontOpenName(Dpy, Scr, name)))
-                        die("font not found\n");
+                        die("Unknown font");
                     }
                   else
                     assert(font = XftFontOpenName(Dpy, Scr, "default"));
@@ -5911,11 +5912,11 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   break;
                 }
               else
-                die("unknown primitive\n");
+                die("Unknown primitive");
 
               /* Check that we could process all of $cmd. */
               if (*cmd != '\0')
-                die("junk after graphic command\n");
+                die("Junk after graphic command");
               if (gc != None)
                 XFreeGC(Dpy, gc);
               break;
@@ -5988,7 +5989,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                 { /* Present window. */
                   wmcmd = "_NET_ACTIVE_WINDOW";
                   if (implicit_win)
-                    die("what to top?\n");
+                    die("What to top?");
                 }
               else if (!strcmp(optarg, "close"))
                 { /* Close window. */
@@ -6020,7 +6021,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   else if (!*apwin)
                     mkapwin[n++] = "fs";
                   else
-                    die("unknown abbreviation\n");
+                    die("Unknown abbreviation");
 
                   if (isprefix(optarg, "mapp"))
                     {
@@ -6089,7 +6090,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   assume_top = True;
                 }
               else
-                die("unknown abbreviation\n");
+                die("Unknown abbreviation");
 
               /* Based on $assume_top and $implicit_win, determine $target. */
               if (!implicit_win)
@@ -6141,7 +6142,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
 
               /* All except -E <time> has been processed already. */
               if (!(p = get_duration(optarg, &ms, False)) || *p)
-                die("invalid time specification\n");
+                die("Invalid time specification");
 
               /* Flush the commands so we can wait for the effects. */
               XSync(Dpy, False);
@@ -6171,7 +6172,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
           /* User tried to do use a feature which was not built in. */
           default:
             assert(optchar != EOF && optchar != 1);
-            die("feature not available\n");
+            die("Feature not available");
         } /* switch optchar */
 
       opt_Q = 0;
@@ -6260,7 +6261,7 @@ int main(int argc, char const *const *argv)
 
   /* Connect to X. */
   if (!(Dpy = XOpenDisplay(getenv("DISPLAY"))))
-      die("Couldn't open DISPLAY.\n");
+      die("Couldn't open DISPLAY.");
 
   Scr = DefaultScreen(Dpy);
   Root = DefaultRootWindow(Dpy);
@@ -6320,7 +6321,7 @@ int main(int argc, char const *const *argv)
           if (optchar != 1)
             { /* This is a command. */
               if (limbo)
-                die("required argument missing\n");
+                die("Required argument missing");
               limbo = False;
 
               if (wins)
@@ -6425,7 +6426,7 @@ int main(int argc, char const *const *argv)
 
           /* Would the commands accept an implicit root target window? */
           if (need_wins)
-            die("must specify a window\n");
+            die("Window must be specified");
 
           implicit = True;
           wins = fake_root;
