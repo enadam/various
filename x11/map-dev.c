@@ -2,7 +2,7 @@
   : Our only requirement is x11.  Let us see which optional packages
   : are available.
   pkgs="x11";
-  optional="xfixes xext xdamage xcomposite xtst xi xres xft";
+  optional="xfixes xext xdamage xcomposite xtst xi xres xft xrender";
 
   : We can live without pkg-config if we must, but we will be very limited.
   if pkg-config --version > /dev/null 2>&1;
@@ -304,6 +304,11 @@
  *                      See the examples.  (Specific to hildon-desktop.)
  * -o name=<something>  Make the <window>'s WM_NAME <something>.
  * -o !name             Unset the WM_NAME of <window>.
+ * -o bg=<img>          Make <img> the background of <window>.  For details
+ *                      of <img> see the -G img=... command.  The difference
+ *                      is that when set as background, the image needn't be
+ *                      redrawn after the window has been unexposed.
+ * -o !bg               Unset the background pixmap of <window>.
  * -o [!]OR             Make the <window>s override redirected or clear
  *                      this attribute.
  * -o [!]focusable      Accept (default) or reject keyboard focus.
@@ -361,6 +366,21 @@
  *                      Make <window>'s size the default.
  * -G text=<X>x<Y>[<color>],<text>[,<font>]
  *                      Draw on the window (or pixmap or other drawable).
+ * -G img={{<src-geo> '%'} | {<dst-geo> '@'} | {<size> '#'}}* <fname>
+ *                      Take the <src-geo> rectangle of the image <fname>,
+ *                      and plot it onto the <dst-geo> rectangle of the
+ *                      <window>, scaling the image as necessary.  The image
+ *                      can be in any format supported by the underlaying
+ *                      toolkit.  If none is available this selection is
+ *                      restricted to straight RGB or RGBA images created
+ *                      by the -z command.  This case the image <size>
+ *                      (in pixels) has to be specified too.  By default
+ *                      the position of <dst-geo> is +0+0 and its size is
+ *                      the same as <src-geo> (which also defaults to +0+0
+ *                      and to the size of the image).  You can use "fs"
+ *                      for example to scale the image to the full size
+ *                      of the <window>.  Other expressioons of <geometry>
+ *                      are understood as well.
  * -X [u]app[{@none|<color>}]
  *                      Creates a simple maximized application window.
  *                      If prefixed with 'u' you'll have to map it explicitly.
@@ -484,9 +504,6 @@
  *     Unmap the tapped client window.
  *   * map -m rtcom-call-ui
  *     Remap Phone's topmost window.
- *   * map -k ctrl-BackSpace
- *   * map -X tasw
- *     Go to task switcher.
  *   * map -C win=top _NET_WM_STATE=2,_NET_WM_STATE_FULLSCREEN
  *   * map -X fs
  *     Fullscreen or unfullscreen the current application.
@@ -514,6 +531,16 @@
  *     Create an application window, then go to the switcher, wait, ...
  *   * map -z /ide_%t_%20C.png/ -W 5s -W loop
  *     Take a screenshot every five seconds and preserve the last 20 of them.
+ *   * map -n 200x200 -G img=fs@Christi.jpg
+ *     Load the image, scale it to 200x200 pixels and plot it on the newborn.
+ *     (Either a toolkit or Xrender is required for scaling.)
+ *   * map -G img=1cmx1cm%fs@Christi.jpg
+ *     Take the top-left 1x1cm rectangle of Christi.jpg and project it onto
+ *     the new window.  Note relative geometries (ie. those that depend on
+ *     the default size) are not really useful in front of '%', because it's
+ *     NOT relative to the image's natural size.
+ *   * map -G 'img=300x300#me.rgb'
+ *     This is how to draw a raw RGB/RGBA image.
  *   * map -c cc
  *     Click the middle of the screen (center-center).
  *   * map -c 400x400,400x300
@@ -523,6 +550,9 @@
  *     Fun!
  *
  * Hildon-specific examples:
+ *   * map -k ctrl-BackSpace
+ *   * map -X tasw
+ *     Go to task switcher.
  *   * map -tI request=1 -W loop
  *     On tap switch to portrait mode and back.
  *   * map -Ti nc=1 top
@@ -617,6 +647,7 @@
 
 /* Include files */
 #include <stdlib.h>
+#include <stdint.h>
 #include <unistd.h>
 #include <limits.h>
 #include <assert.h>
@@ -629,7 +660,9 @@
 #include <math.h>
 #include <time.h>
 #include <signal.h>
+#include <arpa/inet.h>
 #include <sys/time.h>
+#include <sys/stat.h>
 #include <sys/shm.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
@@ -681,6 +714,9 @@
 #ifdef HAVE_XFT
 # include <X11/Xft/Xft.h>
 #endif
+#ifdef HAVE_XRENDER
+# include <X11/extensions/Xrender.h>
+#endif
 
 #ifdef HAVE_GDK_PIXBUF
 # include <gdk-pixbuf/gdk-pixbuf.h>
@@ -697,6 +733,11 @@
 # endif
 # include "sgxdefs.h"
 #endif
+
+/* XImage characteristics */
+#define X11_BITS_PER_CHANNEL    8
+#define X11_BYTES_PER_PIXEL     4
+#define X11_BITS_PER_PIXEL      (X11_BITS_PER_CHANNEL * X11_BYTES_PER_PIXEL)
 
 /* Some symbols of xlib are different in C++. */
 #ifndef __cplusplus
@@ -799,8 +840,9 @@ static int Verbose, Is_interactive;
 /* Private functions */
 static void __attribute__((noreturn)) die(char const *msg)
 {
-    fputs(msg, stderr);
-    exit(1);
+  fputs(msg ? msg : strerror(errno), stderr);
+  fputc('\n', stderr);
+  exit(1);
 } /* die */
 
 #ifndef __cplusplus
@@ -808,7 +850,7 @@ static void *xmalloc(void *ptrp, size_t size)
 {
   void *ptr;
   if (!(ptr = malloc(size)))
-    die("Out of memory\n");
+    die(NULL);
   return *(void **)ptrp = ptr;
 } /* xmalloc */
 
@@ -816,7 +858,7 @@ static void *xrealloc(void *ptrp, size_t size)
 {
   void *ptr;
   if (!(ptr = realloc(*(void **)ptrp, size)))
-    die("Out of memory\n");
+    die(NULL);
   memcpy(ptrp, &ptr, sizeof(ptr));
   return ptr;
 } /* xrealloc */
@@ -825,7 +867,7 @@ template<typename T>
 static T xmalloc(T *ptrp, unsigned size)
 {
   if (!(*ptrp = (T)malloc(size)))
-    die("Out of memory\n");
+    die(NULL);
   return *ptrp;
 } /* xmalloc */
 
@@ -833,7 +875,7 @@ template<typename T>
 static T xrealloc(T *ptrp, unsigned size)
 {
   if (!(*ptrp = (T)realloc(*ptrp, size)))
-    die("Out of memory\n");
+    die(NULL);
   return *ptrp;
 } /* xrealloc */
 #endif /* __cplusplus */
@@ -1100,7 +1142,7 @@ static char const *get_short_or_float(char const *p, short *np, float *fp)
 
   if ((p = get_int_or_float(p, &i, fp)) != NULL
       && *fp && (i < SHRT_MIN || SHRT_MAX < i))
-    die("integer value out of range\n");
+    die("Integer value out of range");
   *np = i;
   return p;
 } /* get_short_or_float */
@@ -1183,14 +1225,14 @@ static char const *get_optarg(char const *str,
         switch (*str++)
           {
           case '\0':
-            die("unterminated string\n");
+            die("Unterminated string");
           case ',':
             if (!endc)
               return str;
           }
         if (lenp)
           (*lenp)++;
-      } /* for */
+      } /* until $endc is found */
 
     if (!endc)
       /* We've reached the end of the string, no more arguments. */
@@ -1229,7 +1271,7 @@ static unsigned get_int_list(long *list, unsigned max, char const *str)
   for (;;)
     {
       if (i >= max)
-        die("too many arguments\n");
+        die("Too many arguments");
       else if (!*str)
         break;
 
@@ -1273,7 +1315,7 @@ static char const *get_duration(char const *p, unsigned *msp, Bool isms)
   if (!(p = get_int_or_float(p, &n, &f)))
     return NULL;
   if (f < 0 || (!f && n < 0))
-    die("negative time\n");
+    die("Negative time");
 
   /* Does it denote seconds or milisecs? */
   if (p[0] == 'm' && p[1] == 's')
@@ -1446,33 +1488,42 @@ static char const *get_xpos(char const *p, XPoint *xpos)
   return get_point(p, &xpos->x, &xpos->y, NULL, True);
 } /* get_xpos */
 
-/* Get a <geo>.  See the user documentation for examples. */
-static char const *get_geometry(char const *str, XRectangle *geo)
+/* Get a <size>. */
+static char const *get_size(char const *str,
+                            unsigned short *widthp, unsigned short *heightp)
 {
-  char const *p1, *pp, *origin;
-
   if (str[0] == 'F' && str[1] == 'S')
     { /* Entire display. */
-      geo->x = geo->y = 0;
-      geo->width  = DpyWidth;
-      geo->height = DpyHeight;
+      *widthp  = DpyWidth;
+      *heightp = DpyHeight;
       return str + 2;
     }
   else if (str[0] == 'f' && str[1] == 's')
     { /* Default size ($DfltWidth x $DfltHeight) */
-      geo->x = geo->y = 0;
-      geo->width  = DfltWidth;
-      geo->height = DfltHeight;
+      *widthp  = DfltWidth;
+      *heightp = DfltHeight;
       return str + 2;
     }
+  else
+    return get_dims_or_coords(str, (short *)widthp, (short *)heightp,
+                              True, True, True);
+}
 
-  if (!(p1 = get_dims_or_coords(str,
-                                (short*)&geo->width, (short*)&geo->height,
-                                True, True, True)))
-    die("invalid geometry\n");
+/* Get a <geo>.  See the user documentation for examples. */
+static char const *get_geometry_nok(char const *str, XRectangle *geo)
+{
+  char const *p1, *pp, *origin;
+
+  if (!(p1 = get_size(str, &geo->width, &geo->height)))
+    {
+      geo->width = geo->height = 0;
+      return NULL;
+    }
+
   if (!(pp = get_point(p1, &geo->x, &geo->y, &origin, False)))
     { /* Recognize {<dim>x<rel>}{<off><coord>} (eg. 100x0.5+10+0.5). */
       short w2, h2;
+
       if ((pp = get_dims_or_coords(str, &w2, &h2, True, False, True)) != NULL
           && (pp = get_point(pp, &geo->x, &geo->y, &origin, False)) != NULL)
         { /* Yes, the alternative parsing was successful. */
@@ -1500,6 +1551,14 @@ static char const *get_geometry(char const *str, XRectangle *geo)
 
   assert(pp != NULL);
   return pp;
+} /* get_geometry_nok */
+
+/* Get a <geo> and die on parse error. */
+static char const *get_geometry(char const *str, XRectangle *geo)
+{
+  if (!(str = get_geometry_nok(str, geo)))
+    die("Invalid geometry");
+  return str;
 } /* get_geometry */
 
 /* Resolve $str as a color name. */
@@ -1534,7 +1593,7 @@ static char const *get_color_by_name(Colormap cmap, char const *str,
           xcolor->blue  = rand();
         }
       else
-        die("unknown color\n");
+        die("Unknown color");
     }
 
   assert(XAllocColor(Dpy, cmap, xcolor));
@@ -1565,7 +1624,7 @@ static char const *get_xcolor(Colormap cmap, char const *str, XColor *xcolor)
       has_alpha = True;
       alpha = strtoul(str, (char **)&endp, 0);
       if (!(str < endp))
-        die("missing alpha from color specification\n");
+        die("Missing alpha from color specification");
       str = endp;
     }
 
@@ -1595,13 +1654,13 @@ static char const *get_xcolor(Colormap cmap, char const *str, XColor *xcolor)
     {
       if (has_alpha)
         /* We already had a '#' or '%'. */
-        die("double alpha in color specification\n");
+        die("Double alpha in color specification");
 
       str++;
       has_alpha = True;
       alpha = strtoul(str, (char **)&endp, 0);
       if (!(str < endp))
-        die("missing alpha from color specification\n");
+        die("Missing alpha from color specification");
       str = endp;
     }
 
@@ -1859,7 +1918,7 @@ static Window find_topmost(void)
 
   top = Root;
   if (!find_client_window(&top, NULL, NULL))
-    die("no topmost window\n");
+    die("No topmost window");
   return top;
 } /* find_topmost */
 
@@ -1921,7 +1980,7 @@ static Window choose_window(char const *str)
   else if (!strcmp(str, "wm"))
     {
       if (!(win = find_wm_window()))
-        die("no window manager running\n");
+        die("No window manager running");
     }
   else if (!strcmp(str, "top"))
     win = find_topmost();
@@ -1929,7 +1988,7 @@ static Window choose_window(char const *str)
     {
       win = Root;
       if (!find_client_window(&win, NULL, &str[4]))
-        die("no such window\n");
+        die("No such window");
     }
   else
     { /* Either an XID or a window name. */
@@ -1938,7 +1997,7 @@ static Window choose_window(char const *str)
         {
           win = Root;
           if (!find_client_window(&win, str, NULL))
-            die("no such window\n");
+            die("No such window");
         }
       else if (win == 0)
         win = Root;
@@ -1964,7 +2023,7 @@ must_choose_window(char const *str)
   Window win;
 
   if (!(win = choose_window(str)))
-      die("you have to choose a window\n");
+      die("Window must be chosen");
   return win;
 } /* must_choose_window */
 
@@ -2031,7 +2090,7 @@ static Bool get_win_attrs(Drawable win, XWindowAttributes *attrs,
   if (!(error = untrap_xerrors()))
     return True;
   if (error == BadWindow)
-    die("window does not exist\n");
+    die("Window doesn't exist");
 
   /* $win is a pixmap. */
   assert(error == BadMatch);
@@ -2201,7 +2260,7 @@ static void print_info(Drawable win, Bool recursive, unsigned level)
   /* Print the window's name. */
   name = cls.res_name = cls.res_class = NULL;
   if (is_window)
-    { /* Pixmap don't have a name. */
+    { /* Pixmaps don't have a name. */
       XFetchName(Dpy, win, &name);
       XGetClassHint(Dpy, win, &cls);
     }
@@ -2693,9 +2752,10 @@ struct image_st
 # define mkrgb qRgba
 typedef QRgb rgb_st;
 #else
-typedef struct
+typedef union
 {
-  unsigned char r, g, b, a;
+  struct { uint8_t r, g, b, a; };
+  char bytes[0];
 } rgb_st;
 
 static rgb_st mkrgb(unsigned char r, unsigned char g, unsigned char b,
@@ -2711,6 +2771,27 @@ static rgb_st mkrgb(unsigned char r, unsigned char g, unsigned char b,
   return rgb;
 } /* mkrgb */
 #endif /* ! HAVE_QT */
+
+/* Return the probable alpha mask, ie. the complement of red|green|blue. */
+static unsigned alpha_mask(unsigned red, unsigned green, unsigned blue,
+                           unsigned depth)
+{
+  /* Assume there's an alpha channel if the color masks don't cover
+   * the full $depth.  Be pedantic about not overflowing if it's 32. */
+  assert(red && green && blue);
+  return ((((1 << (depth-1)) - 1) << 1) | 1) & ~(red|green|blue);
+} /* alpha_mask */
+
+/* Returns whether $attrs->visual has an alpha channel
+ * (ie. has an alpha mask). */
+static Bool visual_has_alpha(XWindowAttributes const *attrs)
+{
+  Visual const *visual;
+
+  visual = attrs->visual;
+  return alpha_mask(visual->red_mask, visual->green_mask, visual->blue_mask,
+                    attrs->depth) != 0;
+} /* visual_has_alpha */
 
 /* Returns the length of $n in decimal representation. */
 static unsigned digitsof(unsigned long n)
@@ -2806,15 +2887,15 @@ static char *fname_template(char const *str)
             { /* Always print as many digits as the counter
                * can maximally have. */
               if (minwidth < 1)
-                die("bad prec\n");
+                die("Zero precision");
               lout += digitsof(minwidth-1);
             }
           else
-            die("syntax error\n");
+            die("Syntax error");
         } else if (*in == '%')
           lout++;
       else
-        die("syntax error\n");
+        die("Syntax error");
 
       /* Skip as many characters as we've parsed. */
       in += i;
@@ -2979,7 +3060,7 @@ static void open_image(struct image_st *img, char const *fname,
       img->writer = NULL;
     }
   else
-    die("cannot write image\n");
+    die("Failed to write image");
 #endif /* HAVE_QT */
 
   /* Write straight RGB.  If this is the only format we support (because of
@@ -2988,12 +3069,12 @@ static void open_image(struct image_st *img, char const *fname,
   if (!warned)
     {
       fputs("Warning: writing raw RGB image.  You can convert it to PNG "
-            "by the following ImageMagick command:\n", stderr);
+            "with the following ImageMagick command:\n", stderr);
       warned = 1;
     }
 #endif /* ! HAVE_GDK_PIXBUF && ! HAVE_QT */
   if (!(img->st = fopen(fname, "w")))
-    die("couldn't open output file\n");
+    die(NULL);
   printf("convert -size %ux%u -depth 8 %s:'%s' '%s.png';\n",
          width, height, has_alpha ? "rgba" : "rgb",
          fname, fname);
@@ -3005,26 +3086,71 @@ static void open_image(struct image_st *img, char const *fname,
 static void write_image(struct image_st *img, rgb_st rgb)
 {
 #ifdef HAVE_GDK_PIXBUF
-  if (img->pixbuf)
+  if (!img->pixbuf)
+    fwrite(rgb.bytes, img->has_alpha ? 4 : 3, 1, img->st);
+  else if (img->has_alpha)
     {
-      *img->ptr++ = rgb.r;
-      *img->ptr++ = rgb.g;
-      *img->ptr++ = rgb.b;
-      if (img->has_alpha)
-        *img->ptr++ = rgb.a;
-      return;
+      memcpy(img->ptr, rgb.bytes, 4);
+      img->ptr += 4;
     }
+  else
+    {
+      memcpy(img->ptr, rgb.bytes, 3);
+      img->ptr += 3;
+    }
+  return;
 #endif /* HAVE_GDK_PIXBUF */
 
 #ifdef HAVE_QT
-  if (img->qimg)
+  if (!img->qimg)
     {
-      *img->ptr++ = rgb;
-      return;
+# ifdef __ARMEL__
+      char pixel[4];
+
+      /* Convert $rgb (an integer) to $pixel (array of bytes).
+       * This is byte-order neutral. */
+      pixel[0] = qRed(rgb);
+      pixel[1] = qGreen(rgb);
+      pixel[2] = qBlue(rgb);
+      if (img->has_alpha)
+        {
+          pixel[3] = qAlpha(rgb);
+          fwrite(pixel, 4, 1, img->st);
+        }
+      else
+        fwrite(pixel, 3, 1, img->st);
+# else /* ! __ARMEL__ */
+      unsigned tmp;
+
+      /* Convert $rgb to an integer with bit operations.  This is faster
+       * (smaller) on x86.  Note that we assume that QRgb is 0xAARRGGBB.
+       * This is probably not a big deal, but it's good to know. */
+      tmp = rgb;
+#if __BYTE_ORDER == __LITTLE_ENDIAN
+      tmp = htonl(tmp);
+#endif
+      tmp >>= 8;
+      if (img->has_alpha)
+        {
+#if __BYTE_ORDER == __BIG_ENDIAN
+          rgb <<= 24;
+#endif
+          tmp |= rgb & 0xFF000000;
+          fwrite(&tmp, 4, 1, img->st);
+        }
+      else
+        fwrite(&tmp, 3, 1, img->st);
+# endif /* ! __ARMEL__ */
     }
+  else
+    /* We have a QImage to write to. */
+    *img->ptr++ = rgb;
+  return;
 #endif /* HAVE_QT */
 
-  fwrite(&rgb, img->has_alpha ? 4 : 3, 1, img->st);
+#if !defined(HAVE_GDK_PIXBUF) && !defined(HAVE_QT)
+  fwrite(rgb.bytes, img->has_alpha ? 4 : 3, 1, img->st);
+#endif
 } /* write_image */
 
 /* Finalize $img. */
@@ -3034,7 +3160,7 @@ static void close_image(struct image_st *img)
   if (img->pixbuf)
     {
       if (!gdk_pixbuf_save(img->pixbuf, img->fname, img->fmt, NULL, NULL))
-        die("failed to save image\n");
+        die("Failed to save image");
       gdk_pixbuf_unref(img->pixbuf);
       free(img->tfname);
       return;
@@ -3045,7 +3171,7 @@ static void close_image(struct image_st *img)
   if (img->qimg)
     {
       if (!img->writer->write(*img->qimg))
-        die("failed to save image\n");
+        die("Failed to save image");
       delete img->qimg;
       delete img->writer;
       return;
@@ -3054,7 +3180,7 @@ static void close_image(struct image_st *img)
 
   /* Written a plain file. */
   if (fclose(img->st))
-    die("write error\n");
+      die(NULL);
 } /* close_image */
 
 /* Convert an XImage::data-like byte array to plain RGB888 and write it
@@ -3067,11 +3193,6 @@ static void save_rgb_image(char const *fname, unsigned char const *in,
   unsigned alpha;
   struct image_st out;
   unsigned inner, outer;
-
-  /* Assume there's an alpha channel if the color masks don't cover
-   * the full $depth.  Be pedantic about not overflowing if it's 32. */
-  assert(red && green && blue);
-  alpha = ((((1 << (depth-1)) - 1) << 1) | 1) & ~(red|green|blue);
 
   /* If $Rotated start scanning from bottom-left and traverse up/right. */
   assert(width > 0 && height > 0);
@@ -3087,6 +3208,7 @@ static void save_rgb_image(char const *fname, unsigned char const *in,
       inner = width;
     }
 
+  alpha = alpha_mask(red, green, blue, depth);
   open_image(&out, fname, inner, outer, !!alpha);
   for (; outer > 0; outer--)
     {
@@ -3137,6 +3259,7 @@ static rgb_st yuv2rgb(int y, int u, int v)
                0xff);
 } /* yuv2rgb */
 
+/* Save $img Y'UV -> $fname RGB. */
 static void save_yuv_image(char const *fname, unsigned char const *img,
                            unsigned row, unsigned width, unsigned height)
 {
@@ -3168,6 +3291,775 @@ static void save_yuv_image(char const *fname, unsigned char const *img,
     } /* while we have UYVY:s */
   close_image(&out);
 } /* save_yuv_image */
+
+/* Image loading (-G img, -o bg) */
+/*
+ * Deduce $src->width and $src->height from $orig_w and $orig_h,
+ * and $dst->width and $dst->height from $src if they're missing (zero).
+ * Returns whether $src is NOT equivalent to ${orig_w}x${orig_h}+0+0,
+ * ie. when the source rectangle is not a continuouos byte array.
+ */
+static Bool determine_image_rectangles(XRectangle *src, XRectangle *dst,
+                                       int orig_w, int orig_h)
+{
+  assert(orig_w > 0 && orig_h > 0);
+
+  /* Deduce $src->width, making sure that $src is contained within
+   * $orig_w x $orig_height. */
+  if (!src->width)
+    {
+      if (src->x >= orig_w)
+        die("X offset of the source rectangle is too large");
+      src->width = orig_w - src->x;
+    } else if (src->x + src->width > orig_w)
+      die("Source rectangle is too wide");
+
+  /* Determine/verify $src->height. */
+  if (!src->height)
+    {
+      if (src->y >= orig_h)
+        die("Y offset of the source rectangle is too large");
+      src->height = orig_h - src->y;
+    } else if (src->y + src->height > orig_h)
+      die("Height of the source rectangle is too high");
+
+  /* Set $dst->width and height if not specified. */
+  if (!dst->width)
+    dst->width = src->width;
+  if (!dst->height)
+    dst->height = src->height;
+
+  return src->x || src->y || src->width != orig_w || src->height != orig_h;
+} /* determine_image_rectangles */
+
+/*
+ * Return the mmap($fname) of an RGB[A] image.  The dimensions of the image
+ * must be given in $orig_w and $orig_h in pixels, which are used to decide
+ * whether the image has an alpha channel (returned in *$alphap).  The file
+ * size is also rturned to make it possible for the caller to munmap() the
+ * file later.  The file descriptor is closed before the function returns.
+ */
+static void *mmap_rgb(char const *fname, off_t *fsizep, Bool *alphap,
+                      unsigned orig_w, unsigned orig_h)
+{
+  int fd;
+  char *ptr;
+  struct stat sbuf;
+
+  if ((fd = open(fname, O_RDONLY)) < 0)
+    die(NULL);
+
+  /* Is it an RGB or an RGBA image? */
+  assert(fstat(fd, &sbuf) == 0);
+  if (sbuf.st_size == (off_t)(3 * orig_w * orig_h))
+    *alphap = False;
+  else if (sbuf.st_size == (off_t)(4 * orig_w * orig_h))
+    *alphap = True;
+  else
+    die("RGB image has invalid size");
+
+  /* It's OK to close($fd) having mmap()ped it successfully. */
+  ptr = (char *)mmap(NULL, sbuf.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+  assert(ptr != MAP_FAILED);
+  close(fd);
+
+  /* Done, caller can munmap($ptr, *$fsizep) when it's finished. */
+  *fsizep = sbuf.st_size;
+  return ptr;
+} /* mmap_rgb */
+
+/* Return a $width x $height XImage of $data (which must be in the correct
+ * BGR888 or BGRA8888 format). */
+static XImage *mkximg(Visual *visual, Bool has_alpha,
+                      unsigned width, unsigned height, char *data)
+{
+  unsigned nch;
+
+  nch = has_alpha ? 4 : 3;
+  return XCreateImage(Dpy, visual,
+                      X11_BITS_PER_CHANNEL * nch  /* depth */,
+                      ZPixmap, 0                  /* format, offset */,
+                      data, width, height         /* data, width, height */,
+                      X11_BITS_PER_PIXEL          /* bitmap_pad */,
+                      X11_BYTES_PER_PIXEL * width /* bytes_per_line */);
+} /* mkximg */
+
+/* Read the $dst rectangle of an $src_w x $src_h RGB[A] image from $srcp,
+ * and return a dynamically allocated byte array suitable for XImage.
+ * The implementatio is fine-tuned for big-endian, armel and x86. */
+static char *read_ximage_pixels(char const *srcp, Bool has_alpha,
+                                unsigned src_w, unsigned src_h,
+                                XRectangle const *dst)
+{
+  char const *in;
+  char *dstp, *out;
+  unsigned ibpp, obpp, size;
+
+  /* Determine the input/output bytes per pixel, and allocate memory
+   * for the output. */
+  ibpp = has_alpha ? 4 : 3;
+  obpp = X11_BYTES_PER_PIXEL;
+  size = obpp * dst->width * dst->height;
+  dstp = xmalloc(&out,  size);
+
+  /* Get the $dst rectangele of $srcp and write it to $dstp.  We process
+   * the image pixel by pixel (because some conversion is alwas necessary),
+   * trying to use as few instructions as possible. */
+  for (in = &srcp[ibpp * (src_w*dst->y + dst->x)];
+       out < &dstp[size];
+       in += ibpp * (src_w - dst->width))
+    {
+      unsigned x;
+
+      /* Copy a row. */
+      if (has_alpha)
+        {
+          for (x = dst->width; x > 0; x--)
+            {
+#if __BYTE_ORDER == __BIG_ENDIAN
+              uint32_t *rgb;
+
+              rgb = (uint32_t *)out;
+              memcpy(rgb, in, ibpp);
+              *rgb = (*rgb << 8) | (*rgb >> 24);
+              in += ibpp;
+#elif !defined(__ARMEL__)
+              uint32_t *rgb;
+
+              rgb = (uint32_t *)out;
+              memcpy(rgb, in, ibpp);
+              *rgb = (htonl(*rgb) >> 8) | (*rgb & 0xFF000000);
+              in += ibpp;
+#else /* __ARMEL __ */
+              out[2] = *in++;
+              out[1] = *in++;
+              out[0] = *in++;
+              out[3] = *in++;
+#endif /* __ARMEL__ */
+              out += obpp;
+            } /* for each pixel in the row */
+        }
+      else /* ! $has_alpha */
+        {
+          for (x = dst->width; x > 0; x--)
+            {
+#if __BYTE_ORDER == __BIG_ENDIAN
+              uint32_t *rgb;
+
+              rgb = (uint32_t *)out;
+              memcpy(rgb, in, ibpp);
+              *rgb = (*rgb << 8) | 0xFF;
+              in += ibpp;
+#elif !defined(__ARMEL__)
+              uint32_t *rgb;
+
+              rgb = (uint32_t *)out;
+              memcpy(rgb, in, ibpp);
+              *rgb = (htonl(*rgb) >> 8) | 0xFF000000;
+              in += ibpp;
+#else /* __ARMEL __ */
+              out[2] = *in++;
+              out[1] = *in++;
+              out[0] = *in++;
+              out[3] = 0xFF;
+#endif /* __ARMEL__ */
+              out += obpp;
+            } /* for each pixel in the row */
+        } /* ! $has_alpha */
+    } /* for each row */
+
+  return dstp;
+} /* read_ximage_pixels */
+
+#ifdef HAVE_XRENDER
+/* Return the quotient of $up/$down, where all factors are 16.16 fixed point
+ * numbers.  This representation is used by XRender. */
+static XFixed fixdiv(XFixed up, XFixed down)
+{
+  /* up*2^32 / down*2^16 = (up/down)*2^16
+   * == up/down in XFixed representation */
+#ifdef _LP64
+  ldiv_t d;
+  d = ldiv((uint64_t)up << 32, (unsigned)down << 16);
+#else /* 32bit */
+  lldiv_t d;
+  d = lldiv((uint64_t)up << 32, (unsigned)down << 16);
+#endif
+
+  /* If the type conversion is not in place something goes wrong,
+   * and the assertion fails when it shouldn't. */
+  assert(8*sizeof(d.quot) >= 64);
+  assert((uint64_t)d.quot <= (uint64_t)(~(XFixed)0));
+  return d.quot;
+} /* fixdiv */
+#endif /* HAVE_XRENDER */
+
+/* Take the $src rectangle of the ${orix_w}x${orig_h} image in $fname,
+ * and project it onto the $dst rectangle of $drw.  If $drw is None,
+ * a new Pixmap will be created and returned. */
+static Drawable plot_image_with_x11(Drawable drw, GC gc,
+                                    XWindowAttributes const *attrs,
+                                    char const *fname,
+                                    unsigned orig_w, unsigned orig_h,
+                                    XRectangle *src, XRectangle *dst)
+{
+  char *dstp;
+  off_t fsize;
+  XImage *ximg;
+  char const *srcp;
+  Drawable __attribute__((unused)) final;
+  Bool has_alpha, add_alpha, need_to_scale;
+
+  /* $fname -> $srcp */
+  assert(orig_w > 0 && orig_h > 0);
+  srcp = (char const *)mmap_rgb(fname, &fsize, &has_alpha, orig_w, orig_h);
+
+  /* $srcp -> $dstp */
+  determine_image_rectangles(src, dst, orig_w, orig_h);
+  dstp = read_ximage_pixels(srcp, has_alpha, orig_w, orig_h, src);
+  munmap((void *)srcp, fsize);
+
+  /* $dstp -> $ximg */
+  add_alpha = visual_has_alpha(attrs);
+  ximg = mkximg(attrs->visual, add_alpha, src->width, src->height, dstp);
+
+  /* If @need_to_scale, replace $drw with a temporary pixmap. */
+  final = drw;
+  need_to_scale = dst->width != src->width || dst->height != src->height;
+  if (drw == None || need_to_scale)
+    drw = XCreatePixmap(Dpy, Root, src->width, src->height, attrs->depth);
+
+  if (!need_to_scale)
+    { /* $ximg -> $drw straightly */
+      XPutImage(Dpy, drw, gc, ximg,
+                /* src_x, src_y, dst_x, dst_y, dst_w, dst_h */
+                0, 0, dst->x, dst->y, dst->width, dst->height);
+      XDestroyImage(ximg);
+      return drw;
+    }
+#ifdef HAVE_XRENDER
+  else
+    { /* $ximg -> temporary -> final pixmap */
+      XTransform transform;
+      XRenderPictFormat *fmt;
+      Picture drw_pic, final_pic;
+
+      /* $ximg -> $drw */
+      XPutImage(Dpy, drw, gc, ximg,
+                /* src_x, src_y, dst_x, dst_y, dst_w, dst_h */
+                0, 0, 0, 0, src->width, src->height);
+      XDestroyImage(ximg);
+
+      /* $drw -> $drw_pic */
+      fmt = XRenderFindStandardFormat(Dpy, add_alpha
+                                      ? PictStandardARGB32
+                                      : PictStandardRGB24);
+      drw_pic = XRenderCreatePicture(Dpy, drw, fmt, 0, NULL);
+
+      /*
+       * Scale $drw_pic.  The transformation matrix for scaling is
+       * scale_x 0       0
+       * 0       scale_h 0
+       * 0       0       1
+       */
+      memset(&transform, 0, sizeof(transform));
+      transform.matrix[0][0] = fixdiv(src->width, dst->width);
+      transform.matrix[1][1] = fixdiv(src->height, dst->height);
+      transform.matrix[2][2] = 1 << 16; /* == 1 in XFixed */
+      XRenderSetPictureTransform(Dpy, drw_pic, &transform);
+      XRenderSetPictureFilter(Dpy, drw_pic, "best", NULL, 0);
+
+      /* $drw_pic -> $final */
+      if (final == None)
+        final = XCreatePixmap(Dpy, Root, dst->width, dst->height,
+                              attrs->depth);
+      final_pic = XRenderCreatePicture(Dpy, final, fmt, 0, NULL);
+      XRenderComposite(Dpy, PictOpSrc, drw_pic, None, final_pic,
+                       /* src_x, src_y, mask_x, mask_y */
+                       0, 0, 0, 0,
+                       dst->x, dst->y, dst->width, dst->height);
+
+      XRenderFreePicture(Dpy, drw_pic);
+      XRenderFreePicture(Dpy, final_pic);
+      return final;
+    }
+#else /* ! HAVE_XRENDER */
+  die("Can't scale image");
+#endif /* ! HAVE_XRENDER */
+} /* plot_image_with_x11 */
+
+#ifdef HAVE_GDK_PIXBUF
+/* Like read_ximage_pixels(), return the $dst rect. of the ${src_w}x${src_h}
+ * $srcp image.  ($src_h is actually unused, because we rely on $dst being
+ * within the physical boundaries of $srcp) */
+static char *read_gdk_pixels(char const *srcp, Bool has_alpha,
+                             unsigned src_w, unsigned src_h,
+                             XRectangle const *dst)
+{
+  char const *in;
+  char *dstp, *out;
+  unsigned bpp, size;
+
+  /* Input/output bytes per pixel and size of the destination image. */
+  bpp = has_alpha ? 4 : 3;
+  size = bpp * dst->width * dst->height;
+
+  /* Start $in from the top-left corner of $srcp. */
+  in  = &srcp[bpp * (src_w*dst->y + dst->x)];
+  out = xmalloc(&dstp, size);
+  while (out < &dstp[size])
+    { /* Scan out a whole row at a time. */
+      memcpy(out, in, bpp * dst->width);
+      out += bpp * dst->width;
+      in  += bpp * src_w;
+    } /* for each row */
+
+  return dstp;
+} /* read_gdk_pixels */
+
+/* Scale $pixbuf to $dst->widht x $dst->height. */
+static GdkPixbuf *scale_gdk(GdkPixbuf *pixbuf, XRectangle *dst)
+{
+  GdkPixbuf *scaled;
+
+  scaled = gdk_pixbuf_scale_simple(pixbuf, dst->width, dst->height,
+                                   GDK_INTERP_BILINEAR);
+  gdk_pixbuf_unref(pixbuf);
+
+  dst->width  = gdk_pixbuf_get_width(scaled);
+  dst->height = gdk_pixbuf_get_height(scaled);
+
+  return scaled;
+} /* scale_gdk */
+
+/* Like plot_image_with_x11(), except that $fname can either be in RGB[A]
+ * (in which case $orig_w and $orig_h are mandatory) or in any format
+ * understood by gdk-pixbuf. */
+static Drawable plot_image_with_gdk(Drawable drw, GC gc,
+                                    XWindowAttributes const *attrs,
+                                    char const *fname,
+                                    unsigned orig_w, unsigned orig_h,
+                                    XRectangle *src, XRectangle *dst)
+{
+  XImage *ximg;
+  guchar *srcp;
+  GdkPixbuf *pixbuf;
+  char *dstp, *row, *col;
+  unsigned nch, irs, ors;
+  Bool has_alpha, add_alpha;
+
+  /* Get $pixbuf. */
+  if (orig_w)
+    { /* RGB, possibly crop and/or scale */
+      off_t fsize;
+      Bool needs_to_crop;
+
+      /* $fname -> $srcp */
+      assert(orig_h > 0);
+      needs_to_crop = determine_image_rectangles(src, dst, orig_w, orig_h);
+      srcp = (guchar *)mmap_rgb(fname, &fsize, &has_alpha, orig_w, orig_h);
+      irs = (has_alpha ? 4 : 3) * src->width;
+
+      g_type_init();
+      if (needs_to_crop)
+        { /* $srcp -> $dstp -> $pixbuf */
+          dstp = read_gdk_pixels((const char *)srcp, has_alpha,
+                                 orig_w, orig_h, src);
+          munmap(srcp, fsize);
+          srcp = NULL;
+
+          pixbuf = gdk_pixbuf_new_from_data((guchar const *)dstp,
+                                            GDK_COLORSPACE_RGB, has_alpha,
+                                            X11_BITS_PER_CHANNEL,
+                                            src->width, src->height, irs,
+                                            NULL, NULL);
+        }
+      else
+        { /* no crop; $srcp -> $pixbuf directly */
+          dstp = NULL;
+          pixbuf = gdk_pixbuf_new_from_data(srcp,
+                                            GDK_COLORSPACE_RGB, has_alpha,
+                                            X11_BITS_PER_CHANNEL,
+                                            src->width, src->height, irs,
+                                            NULL, NULL);
+        }
+
+      /* Scale $pixbuf to $dst->widht x $dst->height. */
+      pixbuf = scale_gdk(pixbuf, dst);
+
+      /* Clean up. */
+      if (srcp)
+        munmap(srcp, fsize);
+      free(dstp);
+    }
+  else if (!src->x && !src->y
+           && !src->width && !src->height
+           && (dst->width || dst->height))
+    { /* Not RGB, no cropping, just scale. */
+      GError *err;
+
+      /* Load $fname at scaled size ($dst->width x $dst->height) right away. */
+      err = NULL;
+      g_type_init();
+      if (!(pixbuf = gdk_pixbuf_new_from_file_at_scale(fname,
+                                                  dst->width  ? dst->width : -1,
+                                                  dst->height ? dst->height : -1,
+                                                  FALSE, &err)))
+              die(err->message);
+      dst->width  = gdk_pixbuf_get_width(pixbuf);
+      dst->height = gdk_pixbuf_get_height(pixbuf);
+    }
+  else
+    { /* Crop (and scale possibly). */
+      GError *err;
+
+      /* $fname -> $pixbuf */
+      err = NULL;
+      g_type_init();
+      if (!(pixbuf = gdk_pixbuf_new_from_file(fname, &err)))
+        die(err->message);
+
+      /* Crop $pixbuf if necessary. */
+      if (determine_image_rectangles(src, dst,
+                                     gdk_pixbuf_get_width(pixbuf),
+                                     gdk_pixbuf_get_height(pixbuf)))
+        {
+          GdkPixbuf *cropped;
+
+          cropped = gdk_pixbuf_new_subpixbuf(pixbuf,
+                                             src->x, src->y,
+                                             src->width, src->height);
+          gdk_pixbuf_unref(pixbuf);
+          pixbuf = cropped;
+        }
+
+      /* Scale $pixbuf if necessary. */
+      if (dst->width != src->width || dst->height != src->height)
+              pixbuf = scale_gdk(pixbuf, dst);
+    } /* get $pixbuf */
+
+  assert(gdk_pixbuf_get_bits_per_sample(pixbuf) == X11_BITS_PER_CHANNEL);
+
+  /* $has_alpha == whether $pixbuf has an alpha channel,
+   * $add_alpha == whether $drw has an alpha channel */
+  has_alpha = gdk_pixbuf_get_has_alpha(pixbuf);
+  add_alpha = visual_has_alpha(attrs);
+
+  /* Number of channels in $pixbuf. */
+  nch = has_alpha ? 4 : 3;
+  assert(nch == gdk_pixbuf_get_n_channels(pixbuf));
+
+  /* Input/output rowstride. */
+  irs = gdk_pixbuf_get_rowstride(pixbuf);
+  ors = X11_BYTES_PER_PIXEL * dst->width;
+
+  /* Source and destination image data. */
+  srcp = gdk_pixbuf_get_pixels(pixbuf);
+  xmalloc(&dstp, ors * dst->height);
+
+  /* Convert $srcp (RGB[A]) -> $dstp (BGR[A]). */
+  printf("%d %d\n", has_alpha, add_alpha);
+  for (row = dstp; row < &dstp[ors * dst->height]; row += ors)
+    {
+      for (col = row; col < &row[ors]; srcp += nch)
+        {
+          *col++ = srcp[2];
+          *col++ = srcp[1];
+          *col++ = srcp[0];
+          *col++ = has_alpha && add_alpha ? srcp[3] : 0xFF;
+        }
+      srcp += irs - nch*dst->width;
+    }
+  gdk_pixbuf_unref(pixbuf);
+
+  /* $dstp -> $ximg -> $drw */
+  ximg = mkximg(attrs->visual, add_alpha, dst->width, dst->height, dstp);
+  if (drw == None)
+    drw = XCreatePixmap(Dpy, Root, dst->width, dst->height, attrs->depth);
+  XPutImage(Dpy, drw, gc, ximg,
+            /* src_x, src_y, dst_x, dst_y, dst_w, dst_h */
+            0, 0, dst->x, dst->y, dst->width, dst->height);
+  XDestroyImage(ximg);
+
+  return drw;
+} /* plot_image_with_gdk */
+#elif defined(HAVE_QT)
+/* Like read_ximage_pixels(), except that the returned dynamically allocated
+ * byte array is suitable for QImage construction. */
+static unsigned char *read_qimage_pixels(unsigned char const *srcp, Bool has_alpha,
+                                         unsigned src_w, unsigned src_h,
+                                         XRectangle const *dst)
+{
+  unsigned char const *in;
+  unsigned char *dstp, *out;
+  unsigned ibpp, obpp, size;
+
+  /* Input/output bytes per pixel. */
+  ibpp = has_alpha ? 4 : 3;
+  obpp = sizeof(QRgb);
+
+  /* Size and allocation of output buffer. */
+  size = obpp * dst->width * dst->height;
+  out  = (unsigned char *)xmalloc(&dstp, size);
+
+  /* Scan out row by row, pixel by pixel. */
+  for (in = &srcp[ibpp * (src_w*dst->y + dst->x)];
+       out < &dstp[size];
+       in += ibpp * (src_w - dst->width))
+    {
+      QRgb *rgb;
+      unsigned x;
+
+      if (has_alpha)
+        {
+          for (x = dst->width; x > 0; x--)
+            {
+              rgb = (QRgb *)out;
+
+#if __BYTE_ORDER == __BIG_ENDIAN
+              memcpy(rgb, in, ibpp);
+              *rgb = (*rgb << 8) | (*rgb >> 24);
+#elif !defined(__ARMEL__)
+              memcpy(rgb, in, 4);
+              *rgb = htonl(*rgb);
+              *rgb = (*rgb >> 8) | (*rgb << 24);
+#else /* __ARMEL __ */
+              *rgb  = in[2];
+              *rgb |= in[1] <<  8;
+              *rgb |= in[0] << 16;
+              *rgb |= in[3] << 24;
+#endif /* __ARMEL__ */
+
+              in  += ibpp;
+              out += obpp;
+            } /* for each pixel in the row */
+        } /* $has_alpha */
+      else
+        {
+          for (x = dst->width; x > 0; x--)
+            {
+              rgb = (QRgb *)out;
+
+#if __BYTE_ORDER == __BIG_ENDIAN
+              memcpy(rgb, in, ibpp);
+              *rgb = (*rgb << 8) | 0xFF;
+#elif !defined(__ARMEL__)
+              memcpy(rgb, in, ibpp);
+              *rgb = htonl(*rgb);
+              *rgb = (*rgb >> 8) | 0xFF000000;
+#else /* __ARMEL__ */
+              *rgb  = in[2];
+              *rgb |= in[1] << 8;
+              *rgb |= in[0] << 16;
+              *rgb |= 0xFF000000;
+#endif /* __ARMEL__ */
+
+              in  += ibpp;
+              out += obpp;
+            } /* for each pixel in the row */
+        } /* ! $has_alpha */
+    } /* for each row */
+
+  return dstp;
+} /* read_qimage_pixels */
+
+/* Destructor function for XImage which does NOT free the image data
+ * (because it's owned by a QImage). */
+static int destroy_qt_ximage(XImage *ximg)
+{
+  if (ximg->obdata)
+    XFree(ximg->obdata);
+  XFree(ximg);
+  return 1;
+} /* destroy_qt_ximage */
+
+/* Like plot_image_with_gdk(), except that it uses QImage. */
+static Drawable plot_image_with_qt(Drawable drw, GC gc,
+                                   XWindowAttributes const *attrs,
+                                   char const *fname,
+                                   unsigned orig_w, unsigned orig_h,
+                                   XRectangle *src, XRectangle *dst)
+{
+  QImage qimg;
+  XImage *ximg;
+  unsigned char *data;
+
+  /* Get $qimg at $src->width x $src->height. */
+  if (orig_w)
+    { /* read raw RGB */
+      off_t fsize;
+      Bool has_alpha;
+      unsigned const char *srcp;
+
+      determine_image_rectangles(src, dst, orig_w, orig_h);
+      srcp = (unsigned char const *)mmap_rgb(fname, &fsize, &has_alpha,
+                                             orig_w, orig_h);
+      data = read_qimage_pixels(srcp, has_alpha, orig_w, orig_h, src);
+      munmap((void *)srcp, fsize);
+
+      /* $data will NOT be freed by $qimg. */
+      src->x = src->y = 0;
+      qimg = QImage(data, src->width, src->height, has_alpha
+                    ? QImage::Format_ARGB32 : QImage::Format_RGB32);
+    }
+  else
+    { /* not raw RGB, let QImage load it */
+      if (!qimg.load(fname))
+        die("Invalid image");
+      data = NULL;
+
+      /* Convert $qimg's internal representation into [A]RGB32,
+       * so its constBits() will be straightly usable with mkximg(). */
+      switch (qimg.format())
+        {
+          case QImage::Format_Invalid:
+            die("Invalid format");
+          case QImage::Format_RGB32:
+          case QImage::Format_ARGB32:
+            break;
+          default:
+            qimg = qimg.convertToFormat(qimg.hasAlphaChannel()
+                                        ? QImage::Format_ARGB32
+                                        : QImage::Format_RGB32);
+            break;
+        } /* switch image format */
+
+      /* Crop $qimg if necessary. */
+      if (determine_image_rectangles(src, dst, qimg.width(), qimg.height()))
+        qimg = qimg.copy(src->x, src->y, src->width, src->height);
+    } /* get $qimg */
+
+  /* Scale $qimg if necessary. */
+  if (dst->width != src->width || dst->height != src->height)
+    {
+      qimg = qimg.scaled(dst->width, dst->height,
+                         Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+      dst->width  = qimg.width();
+      dst->height = qimg.height();
+
+      /* free($data) if it's not used anymore. */
+      if (qimg.constBits() != data)
+        {
+          free(data);
+          data = NULL;
+        }
+    } /* scale */
+
+  /* $qimg -> $ximg; override its destructor so that $data is not freed
+   * by XDestroyImage(), because the image data could be entirely $qimg's. */
+  ximg = mkximg(attrs->visual, visual_has_alpha(attrs),
+                dst->width, dst->height, (char *)qimg.constBits());
+  ximg->f.destroy_image = destroy_qt_ximage;
+
+  /* $ximg -> $drw */
+  if (drw == None)
+    drw = XCreatePixmap(Dpy, Root, dst->width, dst->height, attrs->depth);
+  XPutImage(Dpy, drw, gc, ximg,
+            /* src_x, src_y, dst_x, dst_y, dst_w, dst_h */
+            0, 0, dst->x, dst->y, dst->width, dst->height);
+  XDestroyImage(ximg);
+
+  free(data);
+  return drw;
+} /* plot_image_with_qt */
+#endif /* HAVE_QT */
+
+/*
+ * $str := {{<src-geo> '%'} | {<dst-geo> '@'} | {<size> '#'}}* <fname>
+ * Take <src-geo> of <fname> (which, if a raw RGB[A] file, it's <size>
+ * must be declared) and plot it onto $dst of $win, cropping and scaling
+ * the image as necessary.
+ */
+static Drawable plot_image(char const *str, Window win, Bool set_bg)
+{
+  Bool use_x11;
+  char const *p;
+  XRectangle src, dst;
+  unsigned short orig_w, orig_h;
+  GC gc;
+  Drawable drw;
+  Visual visual;
+  XGCValues gcvals;
+  XWindowAttributes attrs;
+
+  /* Parse $str for $src, $dst, $orig_w and $orig_h. */
+  orig_w = orig_h = 0;
+  memset(&src, 0, sizeof(src));
+  memset(&dst, 0, sizeof(dst));
+  for (p = str; *p; p++)
+    {
+      if (*p == '%')
+        { /* Do we have a $src here? */
+          /*
+           * NOTE that this geometry is parsed relative to the default size
+           * (= $win's size), not that of the image (since we don't know its
+           * size yet).  Unfortunately this makes expressions like 100x100br
+           * rather useless.
+           */
+          if (get_geometry_nok(str, &src) != p)
+            break;
+        }
+      else if (*p == '@')
+        { /* $dst */
+          if (get_geometry_nok(str, &dst) != p)
+            break;
+        }
+      else if (*p == '#')
+        { /* $orig_w, $orig_h */
+          if (get_size(str, &orig_w, &orig_h) != p)
+            break;
+          else if (!orig_w || !orig_h)
+            die("Invalid size");
+        }
+      else
+        continue;
+
+      /* @p poitns at [%@#] */
+      str = p + 1;
+    } /* until <fname> is found */
+
+  /* $str should be <fname>. */
+  if (!*str)
+    die("No input file name");
+
+  get_win_attrs(win, &attrs, True, &visual);
+  gc = XCreateGC(Dpy, win, 0, &gcvals);
+  drw = set_bg ? None : win;
+
+  /* $use_x11 if RGB && (!scale || HAVE_XRENDER) */
+  use_x11 = orig_w && orig_h;
+#ifndef HAVE_XRENDER
+  if (use_x11)
+    { /* XRender is required for scaling. */
+      determine_image_rectangles(&src, &dst, orig_w, orig_h);
+      if (dst.width != src.width || dst.height != src.height)
+        use_x11 = False;
+    }
+#endif /* ! HAVE_XRENDER */
+
+  if (use_x11)
+    drw = plot_image_with_x11(drw, gc, &attrs, str,
+                              orig_w, orig_h, &src, &dst);
+  else
+#if defined(HAVE_GDK_PIXBUF)
+    drw = plot_image_with_gdk(drw, gc, &attrs, str,
+                              orig_w, orig_h, &src, &dst);
+#elif defined(HAVE_QT)
+    drw = plot_image_with_qt(drw, gc, &attrs, str,
+                             orig_w, orig_h, &src, &dst);
+#else /* ! HAVE_GDK_PIXBUF && ! HAVE_QT */
+    die("Can't load or plot image");
+#endif
+
+  XFreeGC(Dpy, gc);
+  if (set_bg)
+    {
+      XSetWindowBackgroundPixmap(Dpy, win, drw);
+      XFreePixmap(Dpy, drw);
+    }
+
+  return drw;
+} /* plot_image */
 
 /* Return the integer of the specified $width pointed to be $p. */
 static long xval2long(void const *p, unsigned width)
@@ -3204,7 +4096,7 @@ static char *get_properties(Atom win, Atom key, Atom type,
     return NULL;
 
   if (rtype != type)
-    die("property has a different type\n");
+    die("Property has a different type");
   assert(rfmt == 8 || rfmt == 16 || rfmt == 32);
   *widthp = rfmt/8;
   *nvalsp = n;
@@ -3631,7 +4523,7 @@ static void pointer_event(Window win,
             XTestFakeButtonEvent(Dpy, Button1, False, delay);
         }
 #else /* ! HAVE_XTST */
-      die("no xtst\n");
+      die("Feature not available");
 #endif
     }
   else
@@ -3963,7 +4855,7 @@ static struct event_matcher_st *prepare_event_matcher(char const *events,
             break;
           }
       if (!type)
-        die("unknown event\n");
+        die("Unknown event");
       uevent->type = type;
 
       /* Filter out child_expose, child_damage, child_pornographhy etc.
@@ -3973,7 +4865,7 @@ static struct event_matcher_st *prepare_event_matcher(char const *events,
         {
           if (!(uevent->event_mask
                 & (StructureNotifyMask|SubstructureNotifyMask)))
-            die("event not generated for child windows\n");
+            die("Event not generated for child windows");
           event_mask |= SubstructureNotifyMask;
         }
       else
@@ -3981,9 +4873,9 @@ static struct event_matcher_st *prepare_event_matcher(char const *events,
 
       /* Do we have the right number of arguments? */
       if (!arg && type->arg == HAS_ARG)
-        die("event requires an argument\n");
+        die("Event requires an argument");
       if ( arg && type->arg == NO_ARG && !uevent->is_child)
-        die("event doesn't take arguments\n");
+        die("Event doesn't take arguments");
       uevent->has_arg = arg != NULL;
 
       /* Parse $arg and fill in the event-specific fields of $uevent. */
@@ -4019,7 +4911,7 @@ static struct event_matcher_st *prepare_event_matcher(char const *events,
                 create_region(&uevent->shape);
               }
             if (arg && *get_geometry(arg, &uevent->roi))
-              die("junk after geometry specification\n");
+              die("Junk after geometry specification");
             break;
           case PROPERTY: case NEWPROP: case PROPDEL:
             if (arg)
@@ -4060,7 +4952,7 @@ static struct event_matcher_st *prepare_event_matcher(char const *events,
 
                 /* Get the keycode from the $rest. */
                 if ((sym = XStringToKeysym(arg)) == NoSymbol)
-                  die("unknown keysym\n");
+                  die("Unknown keysym");
                 uevent->keycode = XKeysymToKeycode(Dpy, sym);
               }
             break;
@@ -4078,7 +4970,7 @@ static struct event_matcher_st *prepare_event_matcher(char const *events,
       XShapeQueryExtension(dpy, &uevent_types[RESHAPED].xtype, &shape_error);
       XShapeSelectInput(dpy, win, ShapeNotifyMask);
 #else
-      die("no xext\n");
+      die("Feature not available");
 #endif
     }
 
@@ -4117,7 +5009,7 @@ static struct event_matcher_st *prepare_event_matcher(char const *events,
       state->damage = XDamageCreate(Dpy, win, XDamageReportRawRectangles);
       assert(state->damage != None);
 #else /* ! HAVE_XDAMAGE */
-      die("no xdamage\n");
+      die("Feature not available");
 #endif
     }
 
@@ -4358,7 +5250,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
             else if (!strcmp(optarg, "flip"))
               propcmd = FLIP;
             else
-              die("unknown property command\n");
+              die("Unknown property command");
             continue;
 
           /* Don't let -Q affect an immediately preceeding -p. */
@@ -4418,7 +5310,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                     attrs.height = intersect(&y, attrs.y, attrs.height,
                                              DpyHeight);
                     if (!attrs.width || !attrs.height)
-                      die("window is out of screen\n");
+                      die("Window out of screen");
                     attrs.x -= x;
                     attrs.y -= y;
                   }
@@ -4490,7 +5382,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                         break;
 # endif /* HAVE_OMAPFB */
                       default:
-                        die("unknown pixel data format\n");
+                        die("Unknown pixel data format");
                       }
 #else /* ! HAVE_FB */
                     /* Fuck knows, assume RGB565. */
@@ -4617,9 +5509,9 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   } /* for all shm:s */
 
                 if (!img)
-                  die("couldn't find any good shm\n");
+                  die("Couldn't find appropriate shm");
 #else
-                die("feature not available\n");
+                die("Feature not available");
 #endif
               }
             break;
@@ -4680,7 +5572,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   else if (color[0] == '#' || color[0] == '%')
                     depth = 32;
                   else
-                    die("invalid color specification\n");
+                    die("Invalid color specification");
 
                   /* Create a TrueColor colormap if necessary. */
                   if (depth == 32)
@@ -4699,7 +5591,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   /* Get the background color pixel value. */
                   if (*get_color_pixel(attrs.colormap, color,
                                        &attrs.background_pixel) != '\0')
-                    die("junk after color specification\n");
+                    die("Junk after color specification");
                   flags |= CWBackPixel;
 
                   /* A border color has to be specified too if the visuals
@@ -4820,7 +5712,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                       else if (*optarg == '/')
                         setop = SUBTRACT;
                       else
-                        die("unknown set operation\n");
+                        die("Unknown set operation");
                       optarg++;
                     }
 
@@ -4829,13 +5721,13 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   XFixesSetWindowShapeRegion(Dpy, win, kind, 0, 0, region);
                   XFixesDestroyRegion(Dpy, region);
 #else /* ! HAVE_XFIXES */
-                  die("feature not available\n");
+                  die("Feature not available");
 #endif
                 }
               else
                 { /* Resize and/or relocate the window. */
                   if (*get_geometry(optarg, &rect))
-                    die("junk after geometry specification\n");
+                    die("Junk after geometry specification");
                   XMoveResizeWindow(Dpy, win,
                                    rect.x, rect.y,
                                    rect.width, rect.height);
@@ -4893,7 +5785,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
               else if (!strcmp(optarg, "none"))
                 revert = RevertToNone;
               else
-                die("where to revert the focus if the window is gone?\n");
+                die("Where to revert the focus if the window is gone?");
               XSetInputFocus(Dpy, win, revert, CurrentTime);
             }
 
@@ -4962,7 +5854,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   else if (!strcmp(p, "unobscured"))
                     ev.xvisibility.state = VisibilityUnobscured;
                   else
-                    die("unknown visibility\n");
+                    die("Unknown visibility");
 
                   ev.type = VisibilityNotify;
                   XSendEvent(Dpy, win, False, VisibilityChangeMask, &ev);
@@ -4982,7 +5874,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   XSendEvent(Dpy, win, False, PropertyChangeMask, &ev);
                 }
               else
-                die("unknown event\n");
+                die("Unknown event");
               break;
             }
 
@@ -5067,6 +5959,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                 {
                   Bool set;
                   char *dup;
+                  char const *img;
 
                   dup = opt;
                   if (*opt == '!')
@@ -5086,6 +5979,16 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                     { /* For the idiots. */
                       assert(set);
                       XStoreName(Dpy, win, name);
+                    }
+                  else if (!strcmp(opt, "bg"))
+                    { /* Unset the background. */
+                      assert(!set);
+                      XSetWindowBackgroundPixmap(Dpy, win, None);
+                    }
+                  else if ((img = isprefix(opt, "bg=")) != NULL)
+                    {
+                      assert(set);
+                      plot_image(img, win, True);
                     }
                   else if (!strcmp(opt, "OR"))
                     {
@@ -5123,7 +6026,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   else if (!strcmp(opt, "nofs"))
                     fs = !set;
                   else
-                    die("unknown flag\n");
+                    die("Unknown flag");
 
                   free(dup);
                 }
@@ -5166,7 +6069,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                            XA_ATOM, &afs, 1, PropModeReplace);
                     }
                   else
-                    die("can't unfullscreen an unmanaged window\n");
+                    die("Can't unfullscreen an unmanaged window");
                 }
               break;
             }
@@ -5274,7 +6177,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   for (sym[1] = '\0'; (sym[0] = *str) != '\0'; str++)
                     {
                       if ((keysym = XStringToKeysym(sym)) == NoSymbol)
-                        die("unknown keysym\n");
+                        die("Unknown keysym");
                       keycode = XKeysymToKeycode(Dpy, keysym);
                       XTestFakeKeyEvent(Dpy, keycode, True, CurrentTime);
                       XTestFakeKeyEvent(Dpy, keycode, False, delay);
@@ -5367,9 +6270,9 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   /* Get the coordinate to move to, or where to begin. */
                   old = mew;
                   if (!(p = get_xpos(p, &mew)))
-                    die("invalid coordinates\n");
+                    die("Invalid coordinates");
                   if (mew.x < 0 || mew.y < 0)
-                    die("negative coordinate\n");
+                    die("Negative coordinate");
 
                   /* How long to keep the button pressed? */
                   if (!pressed && !*p)
@@ -5377,7 +6280,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   else if (*p != '@')
                     clicktime = 0;
                   else if (!(p = get_duration(p+1, &clicktime, True)))
-                    die("invalid time specification\n");
+                    die("Invalid time specification");
 
                   if (pressed)
                     { /* Move $old->$mew smoothly */
@@ -5469,7 +6372,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   if (*p == '!')
                     { /* Don't release. */
                       if (*++p != '\0')
-                        die("junk after bang\n");
+                        die("Junk after bang");
                       break;
                     }
                   else if (!*p)
@@ -5497,7 +6400,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                     }
 
                   if (*p++ != ',')
-                    die("junk after coordinate specification\n");
+                    die("Junk after coordinate specification");
                 } /* until end of string */
               break;
             }
@@ -5514,12 +6417,11 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
               valmask = 0;
               if ((cmd = isprefix(optarg, "dflt=")) != NULL)
                 {   /* Set the default size. */
-                  short w, h;
                   char const *p;
+                  unsigned short w, h;
 
                   if (!isprefix(cmd, "0x")
-                      && (p = get_dims_or_coords(cmd, &w, &h,
-                                                 True, True, True)) != NULL)
+                      && (p = get_size(cmd, &w, &h)) != NULL)
                     { /* dflt=<size> */
                       cmd = p;
                       DfltWidth = w;
@@ -5566,7 +6468,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
 
                   /* Position */
                   if (!(cmd = get_xpos(cmd, &p)))
-                    die("invalid coordinates\n");
+                    die("Invalid coordinates");
 
                   /* Color */
                   if (strspn(cmd, "@%#"))
@@ -5581,11 +6483,11 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
 
                   /* Text */
                   if (*cmd++ != ',')
-                    die("where is the text?\n");
+                    die("What to print?");
                   if (!(cmd = get_optarg(cmd,
                                          (char const **)&text.chars,
                                          (size_t *)&text.nchars)))
-                    die("text expected\n");
+                    die("Text expected");
 
                   /* Font */
                   if (*cmd)
@@ -5593,9 +6495,9 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                       char const *font;
 
                       if (!(cmd = get_optarg(cmd, &font, NULL)))
-                        die("font expected\n");
+                        die("Font name expected");
                       if ((text.font = XLoadFont(Dpy, font)) == None)
-                        die("font not found\n");
+                        die("Unknown font");
                     }
                   else
                     text.font = None;
@@ -5619,7 +6521,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
 
                   /* Position */
                   if (!(cmd = get_xpos(cmd, &p)))
-                    die("invalid coordinates\n");
+                    die("Invalid coordinates");
 
                   /* Color */
                   if (strspn(cmd, "@%#"))
@@ -5641,9 +6543,9 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
 
                   /* Text */
                   if (*cmd++ != ',')
-                    die("where is the text?\n");
+                    die("What to print?");
                   if (!(cmd = get_optarg(cmd, &text, &ltext)))
-                    die("text expected\n");
+                    die("Text expected");
 
                   /* Font */
                   if (*cmd)
@@ -5651,9 +6553,9 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                       char const *name;
 
                       if (!(cmd = get_optarg(cmd, &name, NULL)))
-                        die("font expected\n");
+                        die("Font name expected");
                       if (!(font = XftFontOpenName(Dpy, Scr, name)))
-                        die("font not found\n");
+                        die("Unknown font");
                     }
                   else
                     assert(font = XftFontOpenName(Dpy, Scr, "default"));
@@ -5664,13 +6566,18 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   XftFontClose(Dpy, font);
                   XftDrawDestroy(xft);
 #endif /* HAVE_XFT */
-                } /* if */
+                }
+              else if ((cmd = isprefix(optarg, "img=")) != NULL)
+                { /* Plot an image on $win. */
+                  plot_image(cmd, win, False);
+                  break;
+                }
               else
-                die("unknown primitive\n");
+                die("Unknown primitive");
 
               /* Check that we could process all of $cmd. */
               if (*cmd != '\0')
-                die("junk after graphic command\n");
+                die("Junk after graphic command");
               if (gc != None)
                 XFreeGC(Dpy, gc);
               break;
@@ -5743,7 +6650,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                 { /* Present window. */
                   wmcmd = "_NET_ACTIVE_WINDOW";
                   if (implicit_win)
-                    die("what to top?\n");
+                    die("What to top?");
                 }
               else if (!strcmp(optarg, "close"))
                 { /* Close window. */
@@ -5775,7 +6682,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   else if (!*apwin)
                     mkapwin[n++] = "fs";
                   else
-                    die("unknown abbreviation\n");
+                    die("Unknown abbreviation");
 
                   if (isprefix(optarg, "mapp"))
                     {
@@ -5844,7 +6751,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                   assume_top = True;
                 }
               else
-                die("unknown abbreviation\n");
+                die("Unknown abbreviation");
 
               /* Based on $assume_top and $implicit_win, determine $target. */
               if (!implicit_win)
@@ -5896,7 +6803,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
 
               /* All except -E <time> has been processed already. */
               if (!(p = get_duration(optarg, &ms, False)) || *p)
-                die("invalid time specification\n");
+                die("Invalid time specification");
 
               /* Flush the commands so we can wait for the effects. */
               XSync(Dpy, False);
@@ -5926,7 +6833,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
           /* User tried to do use a feature which was not built in. */
           default:
             assert(optchar != EOF && optchar != 1);
-            die("feature not available\n");
+            die("Feature not available");
         } /* switch optchar */
 
       opt_Q = 0;
@@ -5962,7 +6869,8 @@ int main(int argc, char const *const *argv)
               "%3$*2$s -A anchor=<gravity>[,<x>,<y>]\n"
               "%3$*2$s -A rotate=<axis>,<degrees>[,<x>,<y>,<z>]\n"
               "%3$*2$s -A scale=<scale-x>[,<scale-y>]\n"
-              "%3$*2$s -o name=NAME\n"
+              "%3$*2$s -o name=NAME -o !name\n"
+              "%3$*2$s -o bg=<img> -o !bg\n"
               "%3$*2$s -o {[!]{OR|focusable|starticonic|iconic|normal|withdrawn|fs}},...\n"
               "%3$*2$s -mu -R [<sibling>|hi|lo|bottom] -L [<sibling>|lo|bottom] -dDK\n"
               "%3$*2$s -k [[<duration>]:][{ctrl|alt|fn}-]...{<keysym>|<string>}\n"
@@ -5971,6 +6879,7 @@ int main(int argc, char const *const *argv)
               "%3$*2$s -c {[sw]{left|right|up|down}|swipe}\n"
               "%3$*2$s -G fill=<geo>[<color>]\n"
               "%3$*2$s -G text=<X>x<Y>[<color>],<text>[,<font>]\n"
+              "%3$*2$s -G img={{<src-geo>'%%'}|{<dst-geo>'@'}|{<size>'#'}}*<fname>\n"
               "%3$*2$s -X [u]{app|mapp|desktop}[#<alpha>][@none|<color>]\n"
               "%3$*2$s -X {top|iconify|close|tasw|fullscreen|fs|ping}\n"
               "%3$*2$s -X {portrait|rotate|noncomp|nc}\n"
@@ -6013,7 +6922,7 @@ int main(int argc, char const *const *argv)
 
   /* Connect to X. */
   if (!(Dpy = XOpenDisplay(getenv("DISPLAY"))))
-      die("Couldn't open DISPLAY.\n");
+      die("Couldn't open DISPLAY.");
 
   Scr = DefaultScreen(Dpy);
   Root = DefaultRootWindow(Dpy);
@@ -6073,7 +6982,7 @@ int main(int argc, char const *const *argv)
           if (optchar != 1)
             { /* This is a command. */
               if (limbo)
-                die("required argument missing\n");
+                die("Required argument missing");
               limbo = False;
 
               if (wins)
@@ -6178,7 +7087,7 @@ int main(int argc, char const *const *argv)
 
           /* Would the commands accept an implicit root target window? */
           if (need_wins)
-            die("must specify a window\n");
+            die("Window must be specified");
 
           implicit = True;
           wins = fake_root;
