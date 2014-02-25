@@ -1,0 +1,164 @@
+#!/bin/bash -e
+#
+# regtest -- test suite for speedtest
+#
+# This script exercises speedtest to ensure that it works correctly
+# with all settings.
+#
+# Synopsis:
+#   regtest [{<rounds>|0} [{<timeout>|0} [<nprocs>]...]]
+#
+# Parameters:
+#   <rounds>:	The number of times the test cases are repeated.
+#		The default is 3.
+#   <timeout>:	How long a test case should last.  The default is 10s.
+#   <nprocs>:	How many connections to simulate.  The default is to
+#		execute the test cases with 1, 2, 5, 10 and 50 connections.
+#
+# The program generates logs in regtest-server.log and regtest-client.log.
+#
+
+# Parse the command line.
+NROUNDS=3;
+TIMEOUT=10;
+NPROCS="1 2 5 10 50";
+if [ $# -gt 0 ];
+then
+	[ $1 -gt 0 ] \
+		&& NROUNDS=$1;
+	shift;
+fi
+
+if [ $# -gt 0 ];
+then
+	[ $1 -gt 0 ] \
+		&& TIMEOUT=$1;
+	shift;
+fi
+
+if [ $# -gt 0 ];
+then
+	NPROCS="$@";
+fi
+
+# Functions
+# Echo and execute "$@".
+COUNTER=1;
+doit() {
+	local tag="$1";
+	shift;
+
+	echo "$tag:$COUNTER:" "$@";
+	COUNTER=$[ COUNTER + 1];
+
+	"$@";
+}
+
+# Play the server role.
+server() {
+	local ip="$1";
+	local proto="$2";
+	local nprocs=$3;
+	for role in "--receiver" "--sender=$TIMEOUT";
+	do
+		doit server ./speedtest $ip $proto $role -n $nprocs;
+	done
+}
+
+# Play the client role.
+client() {
+	local ip="$1";
+	local proto="$2";
+	local nprocs=$3;
+	local dest="$4";
+	local stats="$5";
+	for role in "--sender=$TIMEOUT" "--receiver";
+	do
+		sleep 2;
+		doit client ./speedtest $ip $proto $role \
+			-n $nprocs $dest --quiet $stats;
+	done
+}
+
+# Run speedtest with all possible combination of IP versions, transport layer
+# protocols, number of connections ($NPROCS) and statistics (overall, wide
+# and none) $NROUNDS times.
+testcfg() {
+	side="$1";
+
+	# --sender, --receiver; $NROUNDS
+	time=$[ TIMEOUT * 2 * NROUNDS ];
+
+	# Do we have IPv6?
+	if [ -f /proc/net/tcp6 ];
+	then
+		ipv6="-6";
+		time=$[ time * 2 ];
+	fi
+
+	# Do we have SCTP?
+	if [ -d /proc/net/sctp ];
+	then
+		sctp="--sctp";
+		time=$[ time * 2 ];
+	fi
+
+	# Do we have root privileges?  If not, don't touch iptables.
+	if [ $UID -eq 0 ];
+	then
+		stats="--overall-stats --wide-stats --no-stats";
+		time=$[ time * 3 ];
+	else
+		stats="--no-iptables";
+	fi
+
+	# Estimate the time to complete the test.
+	n=0;
+	for i in $NPROCS;
+	do
+		n=$[ n + 1 ];
+	done
+	time=$[ time * n ];
+
+	if [ "$side" = "client" ];
+	then
+		echo "Estimated time to complete: $time seconds" >&2;
+	fi
+
+	# Run
+	for round in `seq $NROUNDS`;
+	do
+		for ip in "" $ipv6;
+		do
+			if [ "$ip" = "" ];
+			then
+				dest="127.0.0.1";
+			else
+				dest="::1";
+			fi
+
+			for proto in "" $sctp;
+			do
+				for nproc in $NPROCS;
+				do
+					for stat in $stats;
+					do
+						echo "ROUND $round";
+						$side	"$ip -I=lo" \
+							"$proto" \
+							$nproc \
+							"$dest" \
+							"$stat";
+					done
+				done
+			done
+		done
+	done
+}
+
+# Clean up on exit.
+trap "killall speedtest" EXIT;
+testcfg server > regtest-server.log &
+time testcfg client > regtest-client.log;
+
+# End of regtest
