@@ -1,15 +1,9 @@
-x11/			utilities for developing for X11
+dev/			utilities for programmers
 fs/			file system utilities
+tagging/		tools to list and edit tags of multimedia files
 gimme.pl		tiny HTTP server to share personal stuff
-tick.h			drop-in profiler of user-defined events and actions
-ibusz.pl		help recreating dbus-monitored traffic
-ibusz.patch		make ibusz.pl work even better
-libartem.c		LD_PRELOAD-able embedded syslog
 unbuffer.c		run a program with unbuffered output
-getkey.c		lists or tests which evdev keys are being pressed
 dspsrv.c		TCP/IP server to dump all traffic to /dev/dsp
 tgconscp.c		safe and simple scponlyc replacement
-mafwturbator.pl		funny C identifier generator
 apicsa.pl		mass-upload photos to Google Picasa
 apt-dl.pl		download and optionally extract Debian packages
-masstag			tag MP3 files with title, track number or anything

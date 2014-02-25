@@ -1,0 +1,5 @@
+lsmp3		list ID3v1 tags of mp3 files
+lsmp3v2.pl	list ID3v2 tags of mp3 files
+lsmp4		show the tags of MP4 files
+lsflac		list the tags of FLAC files
+masstag		tag MP3, FLAC and MP4 files in batch
