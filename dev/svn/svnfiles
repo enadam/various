@@ -1,0 +1,66 @@
+#!/bin/sh
+#
+# svnfiles -- print all files in a directory hierarchy skipping SCM files
+#
+# This script is a glorified find(1) which allows you to see all files
+# in the current directory and in its subdirectories save for the contents
+# of .svn and .git.  (Further exclusions may be added in the future.)
+#
+# Synopsis:
+#   svnfiles [<directory>]... [--] [<pattern>]...
+#
+# You may specify any number of glob <pattern>s (eg. '*.c') to restrict
+# the circle of file names to print.  Be sure to quote your pattern
+# specifications.  <directory>es are the places where <pattern>s will be
+# searched for.  By default this is the current directory.  In case of
+# ambiguity, the double-dash can be used to separate <directory>es and
+# <pattern>s.
+#
+# BUGS: <directory> must not contain whitespaces
+
+# Process <directory>es.
+dirs="";
+while [ $# -gt 0 ];
+do
+	if [ "x$1" = "x--" -o ! -d "$1" ];
+	then
+		break;
+	elif [ "$dirs" = "" ];
+	then
+		dirs="$1";
+	else
+		dirs="$dirs $1";
+	fi
+	shift;
+done
+
+if [ "$dirs" = "" ];
+then
+	dirs=".";
+fi
+
+# Process <pattern>s.
+globs="";
+for glob;
+do
+	if [ "$globs" = "" ];
+	then
+		globs="-name '$glob'";
+	else
+		globs="$globs -o -name '$glob'";
+	fi
+done
+
+# Enclose $globs in parenthesis.
+if [ "$globs" != "" ];
+then
+	globs="\\( $globs \\)";
+fi
+
+# Execute find(1).  We need this eval-trick because 1) if we just supplied
+# $globs the shell would expand the wildcards within and 2) if we quoted
+# "$globs" then find(1) would see it as a single argument, which it is not.
+eval exec find $dirs \\\( \\\( -name .svn -o -name .git \\\) -prune \\\) \
+	-o "$globs" -print;
+
+# End of svnfiles

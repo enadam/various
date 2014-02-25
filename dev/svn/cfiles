@@ -1,0 +1,6 @@
+#!/bin/sh
+#
+# cfiles -- show C and C++ source files in a directory hierarchy
+#
+
+exec svnfiles '*.[cCh]' '*.cpp' '*.cxx' '*.cc' '*.hpp';

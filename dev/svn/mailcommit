@@ -1,0 +1,179 @@
+#!/bin/sh
+#
+# mailcommit -- email subversion commit logs and diffs
+#
+# This script is wraps `svn commit' in such a way that the commit message
+# and the diffs are sent as plain text to the specified $email address.
+# This can be useful for self-reflexion (have I fscked up something?)
+# and for review---you just need to reply to the email, quote the code
+# in question and comment on it.  Similar functionality could be achieved
+# with subversion hooks, but unfortunately those require administrative
+# access to the repository.
+#
+# Synopsis:
+#   mailcommit [-nN] [<files-to-commit>]...
+#
+# Options:
+#   -n			don't send notification email; useful for testing
+#   -N			don't send notification email, but print its body
+#
+# Dependencies:
+#   -- either mail(1) or sendmail(8) is required
+#   -- optionally, a diffstat(1) is inserted between the commit message
+#      and the diff.
+#
+# Exit status:
+#   -- zero if notification mail has been sent (<= there was a commit
+#      to notify about)
+#   -- non-zero otherwise
+#
+# Environment:
+#   -- $EDITOR, $VISUAL: which program to invoke to edit the commit message
+#
+# TODO:
+#   -- make -m <msg> and -F <fname> work
+#   -- store $email:s in svn properties
+
+# Whom to send mails.
+email="kukas.feri@example.com";
+email="$email lofasz.joska@example.com";
+
+# Choose a $mailer we know.
+if [ "x$1" = "x-n" ];
+then	# Don't send mail.
+	mailer="test";
+	shift;
+elif [ "x$1" = "x-N" ];
+then	# Don't send mail, but show what would have been sent.
+	mailer="copy";
+	shift;
+elif type mail > /dev/null 2>&1;
+then
+	mailer="mailx";
+elif type sendmail > /dev/null 2>&1;
+then
+	mailer="sendmail";
+elif [ -x /usr/lib/sendmail ];
+then
+	mailer="/usr/lib/sendmail";
+else
+	echo "$0: no known mailer found, cannot send email" >&2;
+	exit 1;
+fi
+
+# Look up an $editor.
+if [ "x$EDITOR" != "x" ];
+then
+	editor="$EDITOR";
+elif [ "x$VISUAL" != "x" ];
+then
+	editor="$VISUAL";
+elif type sensible-editor > /dev/null 2>&1;
+then
+	editor="sensible-editor";
+else
+	echo "$0: no editor found, cannot edit commit message" >&2;
+fi
+
+# Do we have diffstat?
+if type diffstat > /dev/null 2>&1;
+then
+	diffstat="yes";
+else
+	diffstat="no";
+fi
+
+# Save the $diff to be committed.
+diff=`mktemp mailcommit-diff-XXXXXX`;
+svn diff -x -p "$@" > "$diff";
+
+# Receive a copy of the commitlog here.
+commitlog=`mktemp mailcommit-log-XXXXXX`;
+
+# Will point to the repository root directory.
+reporoot=`mktemp mailcommit-root-XXXXXX`;
+
+# Store the tree's digital hash here.  Used to determine whether
+# anything has been committed.
+entries=`mktemp mailcommit-tree-XXXXXX`;
+
+# Ignore SIGINT and let us quit just when svn commit has returned.
+trap '' "INT";
+
+# Hack svn's --editor-cmd to preserve a copy of svn-commit.tmp for us.
+# It is entirely impossible to tell from svn's exit code whether it has
+# committed something (<=> we need to send email) or not, so we have to
+# create a kind of hash of the repository, that's the mtimes of the
+# .svn/entries files, and check whether this hash has changed.
+if svn commit --editor-cmd "foo() { find . -path '*/.svn/entries' -printf '%T@\n' | sort > '$PWD/$entries'; $editor \"\$1\"; code=\$?; rm -f '$PWD/$reporoot'; if [ \"\$PWD\" -ef '$PWD' ]; then ln -sf . '$reporoot'; else ln -sf \"\$PWD\" '$PWD/$reporoot'; fi; ln -f \"\$1\" '$PWD/$commitlog'; exit \$code; }; foo" "$@" && [ -L "$reporoot" ] && ! find "$reporoot/" -path '*/.svn/entries' -printf '%T@\n' | sort | cmp -s - "$entries";
+then
+	(
+		# Assemble the message body.
+		sep="--This line, and those below, will be ignored--";
+		if [ "$diffstat" = "yes" ];
+		then
+			sed -e "/^$sep\$/,\$d";
+			echo;
+			echo "Changed files:";
+			diffstat < "$diff";
+		else
+			sed -e "/^$sep\$/,+1s/^\$/Changed files:/;s/^$sep\$//";
+		fi < "$commitlog";
+		echo;
+		cat "$diff";
+		echo    "=============================" \
+			"End of changes" \
+			"=============================";
+	) \
+	| (
+		subject=`head -1 "$commitlog"`;
+		[ "x$subject" != "x" ] \
+			|| subject="(no subject)";
+		subject="[PATCH] $subject";
+
+		if [ "$mailer" = "test" ];
+		then	# blackhole
+			cat > /dev/null;
+		elif [ "$mailer" = "copy" ];
+		then	# copy out
+			cat;
+		elif [ "$mailer" = "mailx" ];
+		then
+			mail -s "$subject" $email;
+		else	# sendmail
+			set -- $email;
+			(
+				# Construct the message header.
+				# Add a To: field.
+				echo -n "To: $1";
+				while :;
+				do
+					shift;
+					[ $# -gt 0 ] || break;
+					echo -n ", $1";
+				done
+				echo;
+
+				# Add a Subject: field.
+				echo -n "Subject: $subject";
+
+				# End of header.
+				echo "";
+
+				# Copy the message body.
+				cat;
+			) | $mailer -oi -f "$1" -- "$@";
+		fi
+	)
+
+	code=$?;
+	echo "Notification mail (hopefully) sent.";
+else
+	code=$?;
+	echo "No changes committed, no mail sent.";
+fi
+
+rm -f "$diff" "$commitlog" "$reporoot" "$entries";
+exit $code;
+
+# End of mailcommit

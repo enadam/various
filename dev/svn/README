@@ -1,0 +1,4 @@
+mailcommit		email subversion commit logs and diffs
+svnfiles		list non-SCM files 
+cfiles			list C and C++ files
+svnclean		delete files not under version control

@@ -1,0 +1,19 @@
+#!/bin/sh
+#
+# svnclean -- delete all files not under version control of Subversion
+#
+# Synopsis:
+#   svnclean [-C]
+#
+# Specify -C to commit the operation.  Otherwise svnclean will just print
+# the files it would delete.
+#
+
+if [ "x$1" = "x-C" ];
+then
+	svn status --no-ignore | sed -ne 's/^[?I] \+//p' | xargs -- rm -rf;
+else
+	svn status --no-ignore | sed -ne 's/^[?I] \+//p';
+fi
+
+# End of svnclean

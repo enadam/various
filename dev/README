@@ -1,4 +1,5 @@
 x11/			utilities for low-level X11 programming
+svn/			make work with Subversion more comfortable
 tick.h			drop-in profiler of user-defined events and actions
 ibusz.pl		help recreating dbus-monitored traffic
 ibusz.patch		make ibusz.pl work even better
