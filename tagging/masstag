@@ -3,13 +3,13 @@
 # masstag -- tag MP3, FLAC and MP4 files in batch
 #
 # Synopsis:
-#   masstag {-2|--flac|--mp4} [-C] [-T <titles-file>] [<tags>...] [--] 
-#	    [<files>...]
+#   masstag {-2|--flac|--mp4|--to-mp4} [-C] [-T <titles-file>] [<tags>...]
+#	    [--] [<files>...]
 #
 # If <files> are not specified on the command line, first they are read from
 # ./playlist, *.m3u, *.M3U, or *.M3u and then in the current directory
-# looking for *.mp3, *.flac and *.mp4 files with varying capitalization,
-# and finally from the standard input.  MP3, FLAC and MP4 files must not
+# looking for *.mp3, *.flac, *.aac and *.mp4 files with varying capitalization,
+# and finally from the standard input.  MP3, FLAC, AAC and MP4 files must not
 # be mixed.
 #
 # Options:
@@ -19,8 +19,11 @@
 #   --flac		Write FLAC tags with metaflac(1).  This option
 #			must be specified first if operating on FLAC
 #			files.
-#   --mp4		Write XMP (?) tags with ffmpeg(1).  Like --mp4,
+#   --mp4		Write XMP (?) tags with ffmpeg(1).  Like --flac,
 #			this option must precede any tagging option.
+#   --to-mp4		Place input files into MP4 container.  This is
+#			useful for the AAC format, which can't contain
+#			metadata, but it can be used with MP3 files too.
 #   -C			Commit changes.  If not specified, masstag just
 #			prints the commands it would execute.
 #   -T <titles-file>	Read and set the titles of <files> from
@@ -36,15 +39,30 @@
 #   -n <trackno>	Designates the track number of the first file to
 #			be processed.  Subsequent files get increasing
 #			track numbers.  If not specified, track numbers
-#			remain untouched.  This switch doesn't make sense
-#			for video files.
+#			remain untouched.
 #   --			End of options.
 
 do_ffmpeg()
 {
 	local testing="$1";
-	local fname="$2";
-	shift 2;
+	local convert="$2";
+	local fname="$3";
+	shift 3;
+
+	# stdin must be redirected because ffmpeg is messing with it.
+	if [ "$convert" = "yes" ];
+	then	# Convert to MP4 while adding metadata at the same time.
+		case "$fname" in
+		*.aac|*.AAC)
+			# AAC files created by ffmpeg require this flag.
+			aac="-absf aac_adtstoasc";;
+		*)
+			aac="";;
+		esac
+		$testing ffmpeg -i "$fname" -codec:a copy $aac "$@" \
+			"${fname%.*}.mp4" < /dev/null;
+		return;
+	fi
 
 	tmpfile=`mktemp masstag-XXXXXX-$fname`;
 	if $testing ffmpeg -loglevel error \
@@ -83,7 +101,7 @@ do
 		kind="id3v2";
 		shift;
 		;;
-	--flac|--mp4)
+	--flac|--mp4|--to-mp4)
 		# metaflac and ffmpeg options are totally different from
 		# mp3info's and id3v2's.  We need to be told beforehand
 		# to use it.
@@ -92,7 +110,14 @@ do
 			echo "$0: $1 should precede tags" >&2;
 			exit 1;
 		fi
-		kind="${1#--}";
+		if [ "x$1" = "x--to-mp4" ];
+		then
+			kind="mp4";
+			convert="yes";
+		else
+			kind="${1#--}";
+			convert="no";
+		fi
 		shift;
 		;;
         -[TnAlatgyc]|--[A-Z]*)
@@ -106,12 +131,6 @@ do
                         titles="$2";
                 elif [ "x$1" = "x-n" ];
                 then
-			if [ "$kind" = "mp4" ];
-			then
-				echo "$0: cannot set track number " \
-					"for video files" >&2;
-				exit 1;
-			fi
                         track="$2";
 		elif [ "x$1" = "x-A" -o "x$1" = "x-l" ];
 		then	# We accept both, but mp3info(1) and id3v2(1) need
@@ -250,10 +269,15 @@ then
 	done
 
 	if [ "$found" = "no" ];
-	then	# Fail, look for MP3 and FLAC files in the current directory.
+	then	# Fail, look for MP3/4, FLAC and AAC files .
 		if [ "$kind" = "mp4" ];
 		then
-			set -- *.mp4 *.MP4 *.Mp4;
+			if [ "$convert" = "no" ];
+			then
+				set -- *.mp4 *.MP4 *.Mp4;
+			else	# MP4 can contain either AAC or MP3.
+				set -- *.aac *.AAC *.mp3 *.MP3 *.Mp3;
+			fi
 		elif [ "$kind" = "flac" ];
 		then
 			set -- *.flac *.FLAC;
@@ -263,9 +287,9 @@ then
 
 		if [ $# -eq 0 ];
 		then	# Fail, read from standard input.
-			while read mp3;
+			while read fname;
 			do
-				set -- "$@" "$mp3";
+				set -- "$@" "$fname";
 			done
 		fi
 	fi
@@ -298,7 +322,7 @@ then
 	then
 		for fname;
 		do
-			do_ffmpeg "$testing" "$fname" "${args[@]}";
+			do_ffmpeg "$testing" "$convert" "$fname" "${args[@]}";
 		done
 		exit;
 	else
@@ -359,12 +383,18 @@ then
 					--set-tag=TRACKNUMBER="$track" \
 					-- "$fname";
 				;;
+			mp4)
+				do_ffmpeg "$testing" "$convert" \
+					"$fname" "${args[@]}" \
+					-metadata Title="$title" \
+					-metadata Track="$track";
+				;;
 			esac
 
                         track=$((track+1));
 		elif [ "$prog" = "ffmpeg" ];
 		then
-			do_ffmpeg "$testing" "$fname" "${args[@]}" \
+			do_ffmpeg "$testing" "$convert" "$fname" "${args[@]}" \
 				-metadata Title="$title";
 		elif [ "$kind" = "flac" ];
 		then
@@ -395,12 +425,17 @@ else
 					--set-tag=TRACKNUMBER="$track" \
 					-- "$fname";
 				;;
+			mp4)
+				do_ffmpeg "$testing" "$convert" \
+					"$fname" "${args[@]}" \
+					-metadata Track="$track";
+				;;
 			esac
 
                         track=$((track+1));
 		elif [ "$prog" = "ffmpeg" ];
 		then
-			do_ffmpeg "$testing" "$fname" "${args[@]}";
+			do_ffmpeg "$testing" "$convert" "$fname" "${args[@]}";
 		else
                         $testing $prog "${args[@]}" -- "$fname";
 		fi
