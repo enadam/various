@@ -192,15 +192,23 @@ static int remote_to_remote(char const *initiator, struct input_st *input);
 
 /* Private variables */
 /* User controls */
+/* -vq */
 static int Opt_verbosity;
+
+/* -bB */
 static unsigned Opt_min_output_batch = DFLT_MIN_OUTPUT_BATCH;
 static unsigned Opt_max_output_queue = DFLT_INITIAL_MAX_OUTPUT_QUEUE;
 
-static unsigned Opt_maxreqs_degradation = DFLT_ISCSI_MAXREQS_DEGRADATION;
+/* -rR */
 static unsigned Opt_request_retry_time  = DFLT_ISCSI_REQUEST_RETRY_PAUSE;
+static unsigned Opt_maxreqs_degradation = DFLT_ISCSI_MAXREQS_DEGRADATION;
 
-static char const *Basename;
+/* -pP */
+static unsigned Opt_read_progress, Opt_write_progress;
+
+/* For diagnostic output. */
 static FILE *Info;
+static char const *Basename;
 
 /* Program code */
 void warnv(char const *fmt, va_list *args)
@@ -592,7 +600,7 @@ void chunk_written(struct iscsi_context *iscsi, int status,
 	} else
 		scsi_free_scsi_task(task);
 
-	if (Opt_verbosity > 1)
+	if (Opt_write_progress && !(chunk->srcblock % Opt_write_progress))
 		fprintf(Info, "source block %lu copied\n", chunk->srcblock);
 
 	chunk->srcblock = 0;
@@ -624,7 +632,7 @@ void chunk_read(struct iscsi_context *iscsi, int status,
 		return;
 	}
 
-	if (Opt_verbosity > 2)
+	if (Opt_read_progress && !(chunk->srcblock % Opt_read_progress))
 		fprintf(Info, "source block %lu read\n", chunk->srcblock);
 
 	chunk->read_task = task;
@@ -680,7 +688,7 @@ void restart_requests(struct input_st *input)
 				continue;
 			}
 
-			if (Opt_verbosity > 3)
+			if (Opt_verbosity > 1)
 				fprintf(Info, "re-reading source block %lu\n",
 					chunk->srcblock);
 			if (!iscsi_read10_task(
@@ -704,7 +712,7 @@ void restart_requests(struct input_st *input)
 				continue;
 			}
 
-			if (Opt_verbosity > 3)
+			if (Opt_verbosity > 1)
 				fprintf(Info, "rewriting source block %lu\n",
 					chunk->srcblock);
 
@@ -763,7 +771,9 @@ void start_iscsi_read_requests(struct input_st *input)
 		assert(!chunk->read_task);
 		assert(!chunk->time_to_retry);
 
-		if (Opt_verbosity > 3)
+		if (Opt_verbosity > 2
+				&& Opt_read_progress
+				&& !(input->top_block % Opt_read_progress))
 			fprintf(Info, "reading source block %lu\n",
 				input->top_block);
 
@@ -1315,6 +1325,7 @@ int main(int argc, char *argv[])
 	char const *initiator;
 	struct input_st input;
 	struct output_st output;
+	char const *optstring;
 
 	/* Initialize diagnostic output. */
 	Info = stdout;
@@ -1349,7 +1360,8 @@ int main(int argc, char *argv[])
 	} else
 		src.url = dst.url = NULL;
 
-	while ((optchar = getopt(argc, argv, "vqi:s:S:m:d:D:M:Or:R:")) != EOF)
+	optstring = "vqi:s:S:m:p:d:D:OM:P:b:B:r:R:";
+	while ((optchar = getopt(argc, argv, optstring)) != EOF)
 		switch (optchar)
 		{
 		case 'v':
@@ -1358,9 +1370,12 @@ int main(int argc, char *argv[])
 		case 'q':
 			Opt_verbosity--;
 			break;
+
 		case 'i':
 			initiator = optarg;
 			break;
+
+		/* Source-related options */
 		case 's':
 			src.is_local = 0;
 			src.url = optarg;
@@ -1372,6 +1387,11 @@ int main(int argc, char *argv[])
 		case 'm':
 			src.endp.maxreqs = atoi(optarg);
 			break;
+		case 'p':
+			Opt_read_progress = atoi(optarg);
+			break;
+
+		/* Destination-related options */
 		case 'd':
 			dst.is_local = 0;
 			dst.url = optarg;
@@ -1380,13 +1400,24 @@ int main(int argc, char *argv[])
 			dst.is_local = 1;
 			dst.fname = optarg;
 			break;
-		case 'M':
-			dst.endp.maxreqs = atoi(optarg);
-			break;
 		case 'O':
 			output_flags &= ~O_EXCL;
 			output_flags |= O_TRUNC;
 			break;
+		case 'M':
+			dst.endp.maxreqs = atoi(optarg);
+			break;
+		case 'P':
+			Opt_write_progress = atoi(optarg);
+			break;
+
+		case 'b':
+			Opt_min_output_batch = atoi(optarg);
+			break;
+		case 'B':
+			Opt_max_output_queue = atoi(optarg);
+			break;
+
 		case 'r':
 			Opt_request_retry_time = atoi(optarg);
 			break;
@@ -1396,6 +1427,7 @@ int main(int argc, char *argv[])
 				die("maximum iSCSI requests "
 					"degradation must be under 100%%");
 			break;
+
 		default:
 			return 1;
 		}
