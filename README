@@ -7,4 +7,4 @@ dspsrv.c		TCP/IP server to dump all traffic to /dev/dsp
 tgconscp.c		safe and simple scponlyc replacement
 apicsa.pl		mass-upload photos to Google Picasa
 apt-dl.pl		download and optionally extract Debian packages
-sexycat.c		iSCSI disk-dumper
+sexycat.c		iSCSI disk dumper

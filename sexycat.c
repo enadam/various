@@ -1,5 +1,5 @@
 /*
- * sexycat.c -- iSCSI disk-dumper
+ * sexycat.c -- iSCSI disk dumper
  */
 
 /* Configuration */
@@ -182,7 +182,7 @@ static int reconnect_endpoint(struct endpoint_st *endp,
 
 static void destroy_endpoint(struct endpoint_st *endp);
 static int init_endpoint(struct endpoint_st *endp, char const *which,
-	char const *initiator, char const *url, int is_file);
+	char const *initiator, char const *url);
 
 static int local_to_remote(char const *initiator, struct input_st *input);
 static int remote_to_local(char const *initiator, struct input_st *input,
@@ -192,7 +192,7 @@ static int remote_to_remote(char const *initiator, struct input_st *input);
 
 /* Private variables */
 /* User controls */
-static int Opt_verbosity = 1;
+static int Opt_verbosity;
 static unsigned Opt_min_output_batch = DFLT_MIN_OUTPUT_BATCH;
 static unsigned Opt_max_output_queue = DFLT_INITIAL_MAX_OUTPUT_QUEUE;
 
@@ -200,6 +200,7 @@ static unsigned Opt_maxreqs_degradation = DFLT_ISCSI_MAXREQS_DEGRADATION;
 static unsigned Opt_request_retry_time  = DFLT_ISCSI_REQUEST_RETRY_PAUSE;
 
 static char const *Basename;
+static FILE *Info;
 
 /* Program code */
 void warnv(char const *fmt, va_list *args)
@@ -592,7 +593,7 @@ void chunk_written(struct iscsi_context *iscsi, int status,
 		scsi_free_scsi_task(task);
 
 	if (Opt_verbosity > 1)
-		printf("source block %lu copied\n", chunk->srcblock);
+		fprintf(Info, "source block %lu copied\n", chunk->srcblock);
 
 	chunk->srcblock = 0;
 	assert(!chunk->time_to_retry);
@@ -624,7 +625,7 @@ void chunk_read(struct iscsi_context *iscsi, int status,
 	}
 
 	if (Opt_verbosity > 2)
-		printf("source block %lu read\n", chunk->srcblock);
+		fprintf(Info, "source block %lu read\n", chunk->srcblock);
 
 	chunk->read_task = task;
 	assert(!chunk->time_to_retry);
@@ -680,7 +681,7 @@ void restart_requests(struct input_st *input)
 			}
 
 			if (Opt_verbosity > 3)
-				printf("re-reading source block %lu\n",
+				fprintf(Info, "re-reading source block %lu\n",
 					chunk->srcblock);
 			if (!iscsi_read10_task(
 				src->iscsi, src->url->lun,
@@ -704,7 +705,7 @@ void restart_requests(struct input_st *input)
 			}
 
 			if (Opt_verbosity > 3)
-				printf("rewriting source block %lu\n",
+				fprintf(Info, "rewriting source block %lu\n",
 					chunk->srcblock);
 
 			if (LOCAL_TO_REMOTE(input))
@@ -763,7 +764,7 @@ void start_iscsi_read_requests(struct input_st *input)
 		assert(!chunk->time_to_retry);
 
 		if (Opt_verbosity > 3)
-			printf("reading source block %lu\n",
+			fprintf(Info, "reading source block %lu\n",
 				input->top_block);
 
 		if (!iscsi_read10_task(
@@ -838,8 +839,9 @@ void reduce_maxreqs(struct endpoint_st *endp, char const *which)
 	endp->maxreqs = maxreqs;
 
 	if (which)
-		printf("%s target: number of maximal outstanding requests "
-		       "reduced to %u\n", which, endp->maxreqs);
+		fprintf(Info, "%s target: number of maximal "
+			"outstanding requests reduced to %u\n",
+			which, endp->maxreqs);
 }
 
 void return_chunk(struct chunk_st *chunk)
@@ -969,19 +971,14 @@ void destroy_endpoint(struct endpoint_st *endp)
 }
 
 int init_endpoint(struct endpoint_st *endp, char const *which,
-	char const *initiator, char const *url, int is_file)
+	char const *initiator, char const *url)
 {
 	struct scsi_task *task;
 	struct scsi_readcapacity10 *cap;
 	struct scsi_inquiry_block_limits *inq;
 
-	if (is_file)
-	{	/* Endpoint is local, device charactersitic is irrelevant. */
-		endp->fname = url;
-		if (Opt_verbosity > 0)
-			printf("%s is local\n", which);
-		return 1;
-	} else if (!(endp->iscsi = iscsi_create_context(initiator)))
+	/* Create $endp->iscsi and connect to $endp->url. */
+	if (!(endp->iscsi = iscsi_create_context(initiator)))
 	{
 		warn_errno("iscsi_create_context()");
 		return 0;
@@ -1074,7 +1071,7 @@ int init_endpoint(struct endpoint_st *endp, char const *which,
 	}
 
 	if (Opt_verbosity > 0)
-		printf("%s target: blocksize=%u, nblocks=%lu\n",
+		fprintf(Info, "%s target: blocksize=%u, nblocks=%lu\n",
 			which, endp->blocksize, endp->nblocks);
 
 	return 1;
@@ -1305,7 +1302,7 @@ int main(int argc, char *argv[])
 {
 	struct
 	{
-		int is_file;
+		int is_local;
 		union
 		{
 			char const *url;
@@ -1319,14 +1316,16 @@ int main(int argc, char *argv[])
 	struct input_st input;
 	struct output_st output;
 
-	/* Initialize diagnostics. */
+	/* Initialize diagnostic output. */
+	Info = stdout;
+	setvbuf(stderr, NULL, _IOLBF, 0);
 	if ((Basename = strrchr(argv[0], '/')) != NULL)
 		Basename++;
 	else
 		Basename = argv[0];
-	setvbuf(stderr, NULL, _IOLBF, 0);
 
-	/* Prepare our working area. */
+	/* Prepare our working area.  All data structures are rooted 
+	 * from $input: $input.output, $input.src, $input.dst. */
 	memset(&src, 0, sizeof(src));
 	memset(&dst, 0, sizeof(dst));
 	memset(&input, 0, sizeof(input));
@@ -1336,6 +1335,7 @@ int main(int argc, char *argv[])
 	input.output = &output;
 
 	/* Parse the command line */
+	Opt_verbosity = 1;
 	output_flags = O_EXCL;
 
 	/* These defaults are used in --debug mode. */
@@ -1362,20 +1362,22 @@ int main(int argc, char *argv[])
 			initiator = optarg;
 			break;
 		case 's':
+			src.is_local = 0;
 			src.url = optarg;
 			break;
 		case 'S':
-			src.is_file = 1;
+			src.is_local = 1;
 			src.fname = optarg;
 			break;
 		case 'm':
 			src.endp.maxreqs = atoi(optarg);
 			break;
 		case 'd':
+			dst.is_local = 0;
 			dst.url = optarg;
 			break;
 		case 'D':
-			dst.is_file = 1;
+			dst.is_local = 1;
 			dst.fname = optarg;
 			break;
 		case 'M':
@@ -1399,28 +1401,26 @@ int main(int argc, char *argv[])
 		}
 
 	/* Verify that we're not given two local targets. */
-	if ((!src.url && !dst.url)
-		|| (src.is_file && dst.is_file)
-		|| (src.is_file && !dst.url)
-		|| (dst.is_file && !src.url))
-	{
+	if ((src.is_local && dst.is_local) || (!src.url && !dst.url))
 		die("at least one iSCSI target must be specified");
-	} else if (!src.url)
-	{	/* LOCAL_TO_REMOTE() */
-		src.is_file = 1;
-	} else if (!dst.url)
-	{	/* REMOTE_TO_LOCAL() */
-		dst.is_file = 1;
+	else if (!src.url)
+		/* Input is stdin. */
+		src.is_local = 1;
+	else if (!dst.url)
+		/* Output is stdout. */
+		dst.is_local = 1;
 
-		/* process_output_queue() needs the block size of the source
-		 * in order to calculate the output offset. */
-		dst.endp.blocksize = src.endp.blocksize;
-	}
+	/* Both local_to_remote() and remote_to_local() interpret
+	 * NULL file names as stdin/stdout. */
+	assert(src.is_local || src.url);
+	assert(dst.is_local || dst.url);
 
-	/* Make sure we have sane settings. */
-	if (!src.is_file && !src.endp.maxreqs)
+	/* Make sure we have sane settings.  It's important to leave
+	 * local targets' maxreqs zero, because restart_requests()
+	 * depends on it. */
+	if (!src.is_local && !src.endp.maxreqs)
 		src.endp.maxreqs = DFLT_INITIAL_MAX_ISCSI_REQS;
-	if (!dst.is_file && !dst.endp.maxreqs)
+	if (!dst.is_local && !dst.endp.maxreqs)
 		dst.endp.maxreqs = DFLT_INITIAL_MAX_ISCSI_REQS;
 	if (!Opt_min_output_batch)
 		Opt_min_output_batch = 1;
@@ -1429,40 +1429,62 @@ int main(int argc, char *argv[])
 
 	/* Init */
 	signal(SIGPIPE, SIG_IGN);
-	if (!init_endpoint(&src.endp, "source", initiator,
-			src.url, src.is_file))
+	if (src.is_local)
+	{	/* LOCAL_TO_REMOTE() */
+		src.endp.fname = src.fname;
+		if (Opt_verbosity > 0)
+			fputs("source is local\n", Info);
+	} else if (!init_endpoint(&src.endp, "source", initiator, src.url))
 		die(NULL);
-	if (!init_endpoint(&dst.endp, "destination", initiator,
-			dst.url, dst.is_file))
-		die(NULL);
-	create_chunks(&input, src.endp.maxreqs + dst.endp.maxreqs);
+	if (dst.is_local)
+	{	/* REMOTE_TO_LOCAL() */
+		if (!dst.fname || !strcmp(dst.fname, "-"))
+			/* Output is stdout, don't clobber it with info
+			 * messages.  $dst.endp.fname can be left NULL. */
+			Info = stderr;
+		else	/* Output is NOT stdout. */
+			dst.endp.fname = dst.fname;
+		if (Opt_verbosity > 0)
+			fputs("destination is local\n", Info);
 
-	/* Run */
-	if (LOCAL_TO_REMOTE(&input))
-		/* This is the least problematic. */
-		isok = local_to_remote(initiator, &input);
-	else if (REMOTE_TO_LOCAL(&input))
-	{	/* Allocate $output->iov and $output->tasks,
+		/* process_output_queue() needs the block size of the source
+		 * in order to calculate the output offset. */
+		dst.endp.blocksize = src.endp.blocksize;
+
+		/* Allocate $output->iov and $output->tasks,
 		 * which are only needed in this mode. */
 		output.max = Opt_max_output_queue;
 		output.iov = xmalloc(sizeof(*output.iov) * output.max);
 		output.tasks = xmalloc(sizeof(*output.tasks) * output.max);
-		isok = remote_to_local(initiator, &input, output_flags);
-	} else
-	{
+	} else if (!init_endpoint(&dst.endp, "destination",
+			initiator, dst.url))
+		die(NULL);
+	if (!src.is_local && !dst.is_local)
+	{	/* remote_to_remote().   Unfortunately we can't accept
+		 * arbitrary blocksizes, because we can't split/merge
+		 * chunks. */
 		if (dst.endp.blocksize > src.endp.blocksize)
 			die("source target's blocksize must be at least "
 				"as large as the destination's");
 		else if (src.endp.blocksize % dst.endp.blocksize)
 			die("source target's blocksize must be a multiply "
 				"of the destination's");
-		isok = remote_to_remote(initiator, &input);
 	}
+	create_chunks(&input, src.endp.maxreqs + dst.endp.maxreqs);
+
+	/* Run */
+	if (LOCAL_TO_REMOTE(&input))
+		isok = local_to_remote(initiator, &input);
+	else if (REMOTE_TO_LOCAL(&input))
+		isok = remote_to_local(initiator, &input, output_flags);
+	else
+		isok = remote_to_remote(initiator, &input);
 
 	/* Done */
 	if (isok)
 	{	/* If we're not $isok, the libiscsi context may be
-		 * in inconsistent state. */
+		 * in inconsistent state, better not to risk using
+		 * it anymore. */
    		   if (src.endp.iscsi)
 			iscsi_logout_sync(src.endp.iscsi);
 		if (dst.endp.iscsi)
