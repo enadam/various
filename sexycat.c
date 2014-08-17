@@ -1,11 +1,113 @@
 /*
- * sexycat.c -- iSCSI disk dumper
+ * sexycat.c -- iSCSI disk dumper {{{
+ *
+ * Synopsis:
+ *   sexycat [<options>] [<source>] [<destination>]
+ *
+ * Where <source> can be:
+ *   -s <iscsi-url>		Specifies the remote iSCSI source to dump.
+ *   -S <file-name>		Upload the local <file-name> to the remote
+ *				iSCSI destination.
+ *   -S -			Read the standard input.  This is the default
+ *				if none of -sS is specified.
+ * and <destination> is either:
+ *   -d <iscsi-url>		The remote iSCSI destination to write to.
+ *   -D <file-name>		Download the remote iSCSI source to this
+ *				<file-name>.  Unless -O is in effect the
+ *				file won't be overwritten.  If the file is
+ *				seekable (ie. it's a regular file) its size
+ *				is set to the capacity of the iSCSI source.
+ *   -D -			Dump the source iSCSI disk to the standatrd
+ *				output.  This is the default is none of -dD
+ *				is specified.
+ *
+ * Either the <source> or the <destination> must be an iSCSI target.
+ * If both -sd are specified the source iSCSI disk is directly copied
+ * to the destination disk.
+ *
+ * Possible <options> are:
+ *   -i <initiator-name>	Log in to the iSCSI targets with this IQN.
+ *				If not specified some arbitrary identification
+ *				is used.
+ *   -N				Don't do any I/O, just connect to the iSCSI
+ *				device(s) and log in.
+ *   -O				Overwrite the local destination <file-name>.
+ *   -v				Be more verbose:
+ *				-- at level 1 the capacity of the iSCSI disks
+ *				   are printed at the beginning; this is the
+ *				   default and it's useful to see that the
+ *				   connection(s) to the remote iSCSI disk(s)
+ *				   works
+ *				-- at level 2 it's printed when a block is
+ *				   being re-read or rewritten due to a fault
+ *				-- at subsequent levels reading of source
+ *				   blocks are printed if progress reporting
+ *				   is enabled with -p
+ *   -q				Be less verbose.  At verbosity level 0 all
+ *				informational output is suppressed.
+ *   -p <input-progress>	Print input progress every so often.
+ *				The first printout is made when the
+ *				<input-progress>:nth block is being
+ *				or has been read.  For example -p 123
+ *				makes the reading of block #123 logged.
+ *				Ignored when a local file is being uploaded.
+ *   -P <output-progress>	Likewise for output progress.  The first
+ *				printout signifies the writing of the
+ *				<output-progress>:nth source block.
+ *				Ignored if the destination is a local file.
+ *   -m <max-source-reqs>	The maximum number of parallel requests
+ *				to the source iSCSI device.  If connection
+ *				breaks, this number is reduced by the factor
+ *				which can be specified with -R.  Ignored
+ *				when the source is a local file, otherwise
+ *				the default is 32.
+ *   -M <max-dest-reqs>		Same for the maximum number of iSCSI write
+ *				requests.  Ignored when the destination is
+ *				a local file, otherwise the default is 32.
+ *   -b <min-output-batch>	Collect at least this number of input chunks
+ *				before writing them out.  Writing of larger
+ *				batches can be more efficient.  Only effective
+ *				if the destination is a local file, otherwise
+ *				the default is 32.
+ *   -B <max-output-batch>	Write the output batch if this many input
+ *				chunks has been collected.  Only effective
+ *				if the destination is a local file, otherwise
+ *				the default is 64.
+ *   -r <retry-delay>		If reading or writing a chunk is failed,
+ *				wait <retry-delay> milliseconds before
+ *				retrying.  The default is three seconds.
+ *   -R <degradation-percent>	When the connection breaks with an iSCSI
+ *				device it's supposed to be caused by the
+ *				too high amount of parallel iSCSI requests
+ *				(at least this is the case with istgt).
+ *				This case the maximimum number of requests
+ *				(which can be specified with -mM) is reduced
+ *				to this percent.  The value must be between
+ *				0..100, and the default is 50%.
+ *
+ * <iscsi-url> is iscsi://<host>[:<port>]/<target-name>/<LUN>.
+ * <host> can either be a hostname or an IPv4 or IPv6 address.
+ * <target-name> is the target's IQN.  An example for <iscsi-url> is:
+ * iscsi://localhost/iqn.2014-07.net.nsn-net.timmy:omu/1
+ *
+ * To increase effeciency I/O with iSCSI devices and seekable local files
+ * can be done out-of-order, that is, a source block $n may be read/written
+ * later than $m even if $n < $m.  Operations are done in chunks, whose size
+ * is the same as the source or destination iSCSI device's block size.
+ *
+ * The silly `sexy' name refers to the connection with SCSI, which originally
+ * was proposed to be pronounced like that.
+ *
+ * This program is a very far descendent of iscsi-dd.c from libiscsi-1.4.0,
+ * so it can be considered a derivative work, inheriting the licensing terms,
+ * thus being covered by the GNU GPL v2.0+.
+ * }}}
  */
 
 /* Configuration */
 #define _GNU_SOURCE
 
-/* Include files */
+/* Include files {{{ */
 #include <stdlib.h>
 #include <unistd.h>
 #include <stdarg.h>
@@ -23,8 +125,9 @@
 
 #include <iscsi.h>
 #include <scsi-lowlevel.h>
+/* }}} */
 
-/* Standard definitions */
+/* Standard definitions {{{ */
 /* Defaults */
 #define DFLT_INITIAL_MAX_ISCSI_REQS	32
 #define DFLT_INITIAL_MAX_OUTPUT_QUEUE	(DFLT_INITIAL_MAX_ISCSI_REQS * 2)
@@ -32,8 +135,9 @@
 
 #define DFLT_ISCSI_MAXREQS_DEGRADATION	50
 #define DFLT_ISCSI_REQUEST_RETRY_PAUSE	(3 * 1000)
+/* }}} */
 
-/* Macros */
+/* Macros {{{ */
 /* Return whether we're copying the iSCSI source/destination or not. */
 #define LOCAL_TO_REMOTE(input)		(!(input)->src->iscsi)
 #define REMOTE_TO_LOCAL(input)		(!(input)->dst->iscsi)
@@ -41,10 +145,13 @@
 #define MEMBS_OF(ary)			(sizeof(ary) / sizeof((ary)[0]))
 #define LBA_OF(task)			((task)->params.read10.lba)
 #define LBA_OF_CHUNK(chunk)		LBA_OF((chunk)->read_task)
+/* }}} */
 
-/* Type definitions */
-typedef unsigned long scsi_block_addr_t;
-typedef unsigned long scsi_block_count_t;
+/* Type definitions {{{ */
+/* Currently we're limited to 2 TiB because we're using read10/write10,
+ * but this may change in the future. */
+typedef unsigned scsi_block_addr_t;
+typedef unsigned scsi_block_count_t;
 
 /* Represents an iSCSI source or destination target. */
 struct endpoint_st
@@ -54,37 +161,67 @@ struct endpoint_st
 		char const *fname;
 		struct iscsi_url *url;
 	};
+
+	/*
+	 * NULL if the target is local.  This case $fname either designates
+	 * the input/output file name, or standard input/output if it's NULL.
+	 */
 	struct iscsi_context *iscsi;
 
-	/* Zero in case of local target. */
+	/* Designates the current maximum number of parallel write requests,
+	 * which may be decreased by $Opt_maxreqs_degradation.  Zero in case
+	 * of local output. */
 	unsigned maxreqs;
 
-	/* The source's block size in case of local destination. */
+	/* The destination's block size if it's an iSCSI device, otherwise
+	 * the source device's block size.  In the latter case this tells
+	 * the amoount of data in a chunk. */
 	unsigned blocksize;
 
 	union
 	{
+		/* Used for remote targets. */
 		struct
-		{	/* Used for remote targets. */
+		{
+			/* The number of blocks of the target. */
 			scsi_block_count_t nblocks;
-			unsigned granuality, optimum;
+
+			/* In future these may be used to choose
+			 * the optimal transfer amount. */
+			//unsigned granuality, optimum;
 		};
 
-		/* Used for local destination. */
+		/* Used for local destination.  If a file is $seekable,
+		 * we'll use pwrite[v]() to write blocks out-of-order.
+		 * Otherwise they're written sequentially with write[v](). */
 		int seekable;
 	};
 };
 
-/* Represents a unit of data being read or written in a single request. */
+/* Represents a unit of data being read or written in a single request.
+ * Currently the chunk size is the same as the source or destination
+ * device's block size, but this may change in the future. */
 struct input_st;
 struct chunk_st
 {
+	/* If the chunk is unused (not reading or writing), points to the
+	 * next chunk in the input_st::unused chain. */
 	struct chunk_st *next;
+
+	/* All chunks link to the same input_st. */
 	struct input_st *input;
 
+	/* Index of the source block being read or written by this chunk
+	 * or zero if the chunk is unused. */
 	scsi_block_addr_t srcblock;
+
+	/* If the chunk is failed, the number of milliseconds until retry.
+	 * This is recalculated by restart_requests().  Zero for unused
+	 * chunks. */
 	unsigned time_to_retry;
 
+	/* The data carried by this chunk.  When the source is local,
+	 * the input buffer is allocated together with the chunk_st. */
 	union
 	{
 		struct scsi_task *read_task;
@@ -92,38 +229,82 @@ struct chunk_st
 	};
 };
 
+/* Encapsulates all state information needed for writing.  In theory
+ * this struct could be a union at the moment, but this may change
+ * in the future. */
 struct output_st
 {
 	union
 	{
-		/* This is only for remote destination. */
+		/* The number of outstanding write requests.  Zero if the
+		 * destination is local. */
 		unsigned nreqs;
 
+		/* These are only used for local destination.  This case
+		 * the output is done in batches with (p)writev(). */
 		struct
-		{	/* These are only used for local destination. */
+		{
+			/*
+			 * The capacity of $iov and $tasks, thus telling
+			 * the maximum number of buffers in the batch.
+			 * Initially it's $Opt_max_output_queue, but it
+			 * may be increased indefinitely during operation.
+			 */
 			unsigned max;
+
+			/* The actual number of buffers in the batch. */
 			unsigned enqueued;
+
+			/* When a chunk is read it's placed in $tasks.
+			 * When the batch is flushed the buffers are
+			 * copied to $iov, a preallocated iovec array. */
 			struct iovec *iov;
 			struct scsi_task **tasks;
+
+			/*
+			 * Index of the first unwritten source block.
+			 * For example if blocks 0..32 and 64..128 have
+			 * been written this field if 33.  It helps
+			 * determining when the operation is complete.
+			 */
 			scsi_block_addr_t top_block;
 		};
 	};
 };
 
+/* The main structure of the program, stringing all structures together. */
 struct input_st
 {
+	/* Number of parallel read requests.  Zero if the input is a
+	 * local file. */
 	unsigned nreqs;
+
+	/* Index of the first unread source block.  Used to determine
+	 * whether all the disk has been read.  Zero if the input is a
+	 * local file. */
 	scsi_block_addr_t top_block;
 
+	/*
+	 * $unused is a list of preallocated chunks ready for reading.
+	 * $nunused is the number of chunks in the list; it's only used
+	 * by free_surplus_unused_chunks().
+	 *
+	 * $failed is a list of chunks whose reading or writing failed
+	 * and needs to be retried.  $last_failed points to the last
+	 * element of the list; it's only used by restart_requests().
+	 */
 	unsigned nunused;
 	struct chunk_st *unused;
 	struct chunk_st *failed, *last_failed;
 
+	/* Links to all other structures. */
 	struct output_st *output;
 	struct endpoint_st *src, *dst;
 };
+/* }}} */
 
 /* Function prototypes {{{ */
+static void __attribute__((noreturn)) usage(void);
 static void warnv(char const *fmt, va_list *args);
 static void __attribute__((format(printf, 1, 2)))
 	warn(char const *fmt, ...);
@@ -191,9 +372,12 @@ static int remote_to_remote(char const *initiator, struct input_st *input);
 /* }}} */
 
 /* Private variables */
-/* User controls */
+/* User controls {{{ */
 /* -vq */
 static int Opt_verbosity;
+
+/* -pP */
+static unsigned Opt_read_progress, Opt_write_progress;
 
 /* -bB */
 static unsigned Opt_min_output_batch = DFLT_MIN_OUTPUT_BATCH;
@@ -202,15 +386,29 @@ static unsigned Opt_max_output_queue = DFLT_INITIAL_MAX_OUTPUT_QUEUE;
 /* -rR */
 static unsigned Opt_request_retry_time  = DFLT_ISCSI_REQUEST_RETRY_PAUSE;
 static unsigned Opt_maxreqs_degradation = DFLT_ISCSI_MAXREQS_DEGRADATION;
+/* }}} */
 
-/* -pP */
-static unsigned Opt_read_progress, Opt_write_progress;
-
-/* For diagnostic output. */
+/* For diagnostic output.  $Info is the FILE on which informational messages
+ * like progress are printed.  $Basename is used in error reporting. */
 static FILE *Info;
 static char const *Basename;
 
 /* Program code */
+void usage(void)
+{
+	printf("usage: %s [-vq] "
+		"[-pP <progress>] "
+		"[-mM <max-requests> "
+		"[-r <retry-pause>] [-R <request-degradation>] "
+		"[-bB <batch-size>] "
+		"[-i <initiator>] [-N] "
+		"[-sS <source>] [-O] [-dD <destination>]\n",
+		Basename);
+	puts("The source code of this program is available at "
+		"https://github.com/enadam/various");
+	exit(0);
+}
+
 void warnv(char const *fmt, va_list *args)
 {
 	fprintf(stderr, "%s: ", Basename);
@@ -601,7 +799,7 @@ void chunk_written(struct iscsi_context *iscsi, int status,
 		scsi_free_scsi_task(task);
 
 	if (Opt_write_progress && !(chunk->srcblock % Opt_write_progress))
-		fprintf(Info, "source block %lu copied\n", chunk->srcblock);
+		fprintf(Info, "source block %u copied\n", chunk->srcblock);
 
 	chunk->srcblock = 0;
 	assert(!chunk->time_to_retry);
@@ -633,7 +831,7 @@ void chunk_read(struct iscsi_context *iscsi, int status,
 	}
 
 	if (Opt_read_progress && !(chunk->srcblock % Opt_read_progress))
-		fprintf(Info, "source block %lu read\n", chunk->srcblock);
+		fprintf(Info, "source block %u read\n", chunk->srcblock);
 
 	chunk->read_task = task;
 	assert(!chunk->time_to_retry);
@@ -689,7 +887,7 @@ void restart_requests(struct input_st *input)
 			}
 
 			if (Opt_verbosity > 1)
-				fprintf(Info, "re-reading source block %lu\n",
+				fprintf(Info, "re-reading source block %u\n",
 					chunk->srcblock);
 			if (!iscsi_read10_task(
 				src->iscsi, src->url->lun,
@@ -713,7 +911,7 @@ void restart_requests(struct input_st *input)
 			}
 
 			if (Opt_verbosity > 1)
-				fprintf(Info, "rewriting source block %lu\n",
+				fprintf(Info, "rewriting source block %u\n",
 					chunk->srcblock);
 
 			if (LOCAL_TO_REMOTE(input))
@@ -774,7 +972,7 @@ void start_iscsi_read_requests(struct input_st *input)
 		if (Opt_verbosity > 2
 				&& Opt_read_progress
 				&& !(input->top_block % Opt_read_progress))
-			fprintf(Info, "reading source block %lu\n",
+			fprintf(Info, "reading source block %u\n",
 				input->top_block);
 
 		if (!iscsi_read10_task(
@@ -985,7 +1183,7 @@ int init_endpoint(struct endpoint_st *endp, char const *which,
 {
 	struct scsi_task *task;
 	struct scsi_readcapacity10 *cap;
-	struct scsi_inquiry_block_limits *inq;
+	struct scsi_inquiry_block_limits *__attribute__((unused)) inq;
 
 	/* Create $endp->iscsi and connect to $endp->url. */
 	if (!(endp->iscsi = iscsi_create_context(initiator)))
@@ -1029,6 +1227,7 @@ int init_endpoint(struct endpoint_st *endp, char const *which,
 	endp->nblocks = cap->lba + 1;
 	scsi_free_scsi_task(task);
 
+#if 0	/* Unused at the moment. */
 	/* Get the optimal transfer amounts. */
 	if (!(task = iscsi_inquiry_sync(endp->iscsi, endp->url->lun,
 		1, SCSI_INQUIRY_PAGECODE_BLOCK_LIMITS, sizeof(*inq))))
@@ -1079,9 +1278,10 @@ int init_endpoint(struct endpoint_st *endp, char const *which,
 		} else	/* $opt_xfer_len == 0 */
 			endp->optimum = endp->granuality;
 	}
+#endif  /* SCSI_INQUIRY_PAGECODE_BLOCK_LIMITS */
 
 	if (Opt_verbosity > 0)
-		fprintf(Info, "%s target: blocksize=%u, nblocks=%lu\n",
+		fprintf(Info, "%s target: blocksize=%u, nblocks=%u\n",
 			which, endp->blocksize, endp->nblocks);
 
 	return 1;
@@ -1147,7 +1347,7 @@ int local_to_remote(char const *initiator, struct input_st *input)
 				assert(n <= dst->blocksize);
 				if (n < dst->blocksize)
 				{
-					warn("source block %lu "
+					warn("source block %u "
 						"padded with zeroes",
 						chunk->srcblock);
 					memset(&chunk->buf[n], 0,
@@ -1320,7 +1520,7 @@ int main(int argc, char *argv[])
 		};
 		struct endpoint_st endp;
 	} src, dst;
-	int isok, optchar;
+	int isok, optchar, nop;
 	unsigned output_flags;
 	char const *initiator;
 	struct input_st input;
@@ -1346,6 +1546,7 @@ int main(int argc, char *argv[])
 	input.output = &output;
 
 	/* Parse the command line */
+	nop = 0;
 	Opt_verbosity = 1;
 	output_flags = O_EXCL;
 
@@ -1360,10 +1561,14 @@ int main(int argc, char *argv[])
 	} else
 		src.url = dst.url = NULL;
 
-	optstring = "vqi:s:S:m:p:d:D:OM:P:b:B:r:R:";
+	optstring = "hvqi:Ns:S:p:m:d:D:P:OM:b:B:r:R:";
 	while ((optchar = getopt(argc, argv, optstring)) != EOF)
 		switch (optchar)
 		{
+		case 'h':
+			usage();
+			return 0;
+
 		case 'v':
 			Opt_verbosity++;
 			break;
@@ -1373,6 +1578,9 @@ int main(int argc, char *argv[])
 
 		case 'i':
 			initiator = optarg;
+			break;
+		case 'N':
+			nop = 1;
 			break;
 
 		/* Source-related options */
@@ -1384,11 +1592,11 @@ int main(int argc, char *argv[])
 			src.is_local = 1;
 			src.fname = optarg;
 			break;
-		case 'm':
-			src.endp.maxreqs = atoi(optarg);
-			break;
 		case 'p':
 			Opt_read_progress = atoi(optarg);
+			break;
+		case 'm':
+			src.endp.maxreqs = atoi(optarg);
 			break;
 
 		/* Destination-related options */
@@ -1404,20 +1612,14 @@ int main(int argc, char *argv[])
 			output_flags &= ~O_EXCL;
 			output_flags |= O_TRUNC;
 			break;
-		case 'M':
-			dst.endp.maxreqs = atoi(optarg);
-			break;
 		case 'P':
 			Opt_write_progress = atoi(optarg);
 			break;
-
-		case 'b':
-			Opt_min_output_batch = atoi(optarg);
-			break;
-		case 'B':
-			Opt_max_output_queue = atoi(optarg);
+		case 'M':
+			dst.endp.maxreqs = atoi(optarg);
 			break;
 
+		/* Error recovery */
 		case 'r':
 			Opt_request_retry_time = atoi(optarg);
 			break;
@@ -1428,19 +1630,30 @@ int main(int argc, char *argv[])
 					"degradation must be under 100%%");
 			break;
 
+		/* Output batch controls */
+		case 'b':
+			Opt_min_output_batch = atoi(optarg);
+			break;
+		case 'B':
+			Opt_max_output_queue = atoi(optarg);
+			break;
+
 		default:
 			return 1;
 		}
 
 	/* Verify that we're not given two local targets. */
-	if ((src.is_local && dst.is_local) || (!src.url && !dst.url))
-		die("at least one iSCSI target must be specified");
-	else if (!src.url)
+	if (!src.url && !dst.url)
+		/* None of -sSdD is specified. */
+		usage();
+	if (!src.is_local && !src.url)
 		/* Input is stdin. */
 		src.is_local = 1;
-	else if (!dst.url)
+	if (!dst.is_local && !dst.url)
 		/* Output is stdout. */
 		dst.is_local = 1;
+	if (src.is_local && dst.is_local)
+		die("at least one iSCSI target must be specified");
 
 	/* Both local_to_remote() and remote_to_local() interpret
 	 * NULL file names as stdin/stdout. */
@@ -1462,11 +1675,9 @@ int main(int argc, char *argv[])
 	/* Init */
 	signal(SIGPIPE, SIG_IGN);
 	if (src.is_local)
-	{	/* LOCAL_TO_REMOTE() */
+		/* LOCAL_TO_REMOTE() */
 		src.endp.fname = src.fname;
-		if (Opt_verbosity > 0)
-			fputs("source is local\n", Info);
-	} else if (!init_endpoint(&src.endp, "source", initiator, src.url))
+	else if (!init_endpoint(&src.endp, "source", initiator, src.url))
 		die(NULL);
 	if (dst.is_local)
 	{	/* REMOTE_TO_LOCAL() */
@@ -1476,8 +1687,6 @@ int main(int argc, char *argv[])
 			Info = stderr;
 		else	/* Output is NOT stdout. */
 			dst.endp.fname = dst.fname;
-		if (Opt_verbosity > 0)
-			fputs("destination is local\n", Info);
 
 		/* process_output_queue() needs the block size of the source
 		 * in order to calculate the output offset. */
@@ -1505,7 +1714,9 @@ int main(int argc, char *argv[])
 	create_chunks(&input, src.endp.maxreqs + dst.endp.maxreqs);
 
 	/* Run */
-	if (LOCAL_TO_REMOTE(&input))
+	if (nop)
+		isok = 1;
+	else if (LOCAL_TO_REMOTE(&input))
 		isok = local_to_remote(initiator, &input);
 	else if (REMOTE_TO_LOCAL(&input))
 		isok = remote_to_local(initiator, &input, output_flags);
