@@ -2,7 +2,7 @@
  * sexycat.c -- iSCSI disk dumper {{{
  *
  * Synopsis:
- *   sexycat [<options>] [<source>] [<destination>]
+ *   sexycat [<options>] { [<source>] [<destination>] | [ -x <program> ] }
  *
  * Where <source> can be:
  *   -s <iscsi-url>		Specifies the remote iSCSI source to dump.
@@ -21,9 +21,17 @@
  *				output.  This is the default is none of -dD
  *				is specified.
  *
- * Either the <source> or the <destination> must be an iSCSI target.
- * If both -sd are specified the source iSCSI disk is directly copied
- * to the destination disk.
+ * If not in -x mode,  either the <source> or the <destination> must be
+ * an iSCSI target.  If both -sd are specified the source iSCSI disk is
+ * directly copied to the destination disk.  Otherwise:
+ *
+ *   -x <program> [<args>...]	Launch <program> and override its file I/O
+ *				syscalls so that they can be used with iSCSI
+ *				URLs transparently.  This is only possible
+ *				if sexycat is built as part of sexywrap,
+ *				and a dual library/executable was created.
+ *				In this mode all <options> but -i are ignored.
+ *				Example: sexywrap -x cat <iscsi-url> > ide.
  *
  * Possible <options> are:
  *   -i <initiator-name>	Log in to the iSCSI targets with this IQN.
@@ -89,11 +97,22 @@
  * <host> can either be a hostname or an IPv4 or IPv6 address.
  * <target-name> is the target's IQN.  An example for <iscsi-url> is:
  * iscsi://localhost/iqn.2014-07.net.nsn-net.timmy:omu/1
+ * (If you get Connection refused unexpectedly, the reason could be that
+ *  libiscsi tries to connect to the localhost's IPv6 address.  To fix it
+ *  edit /etc/gai.conf so that it includes "precedence ::ffff:0:0/96 100".)
  *
  * To increase effeciency I/O with iSCSI devices and seekable local files
  * can be done out-of-order, that is, a source block $n may be read/written
  * later than $m even if $n < $m.  Operations are done in chunks, whose size
  * is the same as the source or destination iSCSI device's block size.
+ * (This could be improved in the future.)  Requests are sent parallel,
+ * with a backoff strategy if the server feels overloaded.
+ *
+ * TODO query and make use of the server's maximal/optimal chunk size
+ * TODO full documentation
+ *
+ * Dependecies: libiscsi 1.4
+ * Compilation: cc -Wall -O2 -s -lrt -liscsi sexycat.c -o sexycat
  *
  * The silly `sexy' name refers to the connection with SCSI, which originally
  * was proposed to be pronounced like that.
@@ -105,14 +124,26 @@
  */
 
 /* Configuration */
-#define _GNU_SOURCE
+/* For POLLRDHUP */
+#ifndef _GNU_SOURCE
+# define _GNU_SOURCE
+#endif
+
+/* If we're not built as a part of sexywrap, we're building sexycat. */
+#ifndef SEXYWRAP
+# define SEXYCAT
+#endif
+
+#if defined(SEXYWRAP) && defined(SEXYCAT) && !defined(__PIE__)
+# error "You need to build sexywrap+sexycat with -shared -pie -fPIE"
+#endif
 
 /* Include files {{{ */
 #include <stdlib.h>
 #include <unistd.h>
 #include <stdarg.h>
-#include <assert.h>
 #include <errno.h>
+#include <assert.h>
 
 #include <string.h>
 #include <stdio.h>
@@ -120,8 +151,11 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
+
 #include <sys/socket.h>
 #include <sys/uio.h>
+
+#include <linux/limits.h>
 
 #include <iscsi.h>
 #include <scsi-lowlevel.h>
@@ -138,13 +172,52 @@
 /* }}} */
 
 /* Macros {{{ */
-/* Return whether we're copying the iSCSI source/destination or not. */
-#define LOCAL_TO_REMOTE(input)		(!(input)->src->iscsi)
-#define REMOTE_TO_LOCAL(input)		(!(input)->dst->iscsi)
-
+/* Return the number of elements in $ary. */
 #define MEMBS_OF(ary)			(sizeof(ary) / sizeof((ary)[0]))
+
+/* Shortcuts */
 #define LBA_OF(task)			((task)->params.read10.lba)
 #define LBA_OF_CHUNK(chunk)		LBA_OF((chunk)->read_task)
+
+/*
+ * IS_SEXYWRAP():	return whether we're operating on behalf of sexywrap
+ * LOCAL_TO_REMOTE():	return whether we're called by sexywrap::write()
+ *			or if we're uploading a local file to an iSCSI device
+ * REMOTE_TO_LOCAL():	return whether we're called by sexywrap::read()
+ *			or if we're downloading an iSCSI disk to a local file
+ * REMOTE_TO_REMOTE():	return whether we're copying an iSCSI disk to another
+ *			can't be the case if IS_SEXYWRAP()
+ */
+#if !defined(SEXYWRAP)
+# define IS_SEXYWRAP(input)		0
+# define LOCAL_TO_REMOTE(input)		(!(input)->src->iscsi)
+# define REMOTE_TO_LOCAL(input)		(!(input)->dst->iscsi)
+#elif !defined(SEXYCAT)
+# define IS_SEXYWRAP(input)		1
+# define LOCAL_TO_REMOTE(input)		(!(input)->src)
+# define REMOTE_TO_LOCAL(input)		(!(input)->dst)
+#else /* SEXYCAT && SEXYWRAP */
+# define IS_SEXYWRAP(input)		(!(input)->src||!(input)->dst)
+# define LOCAL_TO_REMOTE(input)		(!(input)->src||!(input)->src->iscsi)
+# define REMOTE_TO_LOCAL(input)		(!(input)->dst||!(input)->dst->iscsi)
+#endif
+#define REMOTE_TO_REMOTE(input)		\
+	(!LOCAL_TO_REMOTE(input) && !REMOTE_TO_LOCAL(input))
+
+/* What to do with informational messages. */
+#if !defined(SEXYWRAP)
+# define info(fmt, ...)			fprintf(Info, fmt "\n", __VA_ARGS__)
+#elif !defined(SEXYCAT)
+  /* sexywrap doesn't need them. */
+# define info(fmt, ...)			/* NOP */
+#else /* SEXYCAT && SEXYWRAP */
+# define info(fmt, ...)			\
+do					\
+{					\
+	assert(Info != NULL);		\
+	fprintf(Info, fmt "\n", __VA_ARGS__);	\
+} while (0)
+#endif
 /* }}} */
 
 /* Type definitions {{{ */
@@ -152,6 +225,10 @@
  * but this may change in the future. */
 typedef unsigned scsi_block_addr_t;
 typedef unsigned scsi_block_count_t;
+
+/* Type of function called back when a chunk has been read or written. */
+typedef void (*callback_t)(struct iscsi_context *iscsi, int status,
+	void *command_data, void *private_data);
 
 /* Represents an iSCSI source or destination target. */
 struct endpoint_st
@@ -221,11 +298,13 @@ struct chunk_st
 	unsigned time_to_retry;
 
 	/* The data carried by this chunk.  When the source is local,
-	 * the input buffer is allocated together with the chunk_st. */
+	 * the input buffer is allocated together with the chunk_st.
+	 * $wbuf is used by sexywrapper. */
 	union
 	{
+		void *wbuf;
 		struct scsi_task *read_task;
-		unsigned char buf[0];
+		unsigned char rbuf[0];
 	};
 };
 
@@ -279,10 +358,13 @@ struct input_st
 	 * local file. */
 	unsigned nreqs;
 
-	/* Index of the first unread source block.  Used to determine
-	 * whether all the disk has been read.  Zero if the input is a
-	 * local file. */
-	scsi_block_addr_t top_block;
+	/* $top_block is the index of the first unread source block,
+	 * and keep reading $until is reached.  Both are zero if the
+	 * input is a local file. */
+	scsi_block_addr_t top_block, until;
+
+	/* The number of bytes that has been read. */
+	off_t nread;
 
 	/*
 	 * $unused is a list of preallocated chunks ready for reading.
@@ -316,12 +398,11 @@ static void __attribute__((noreturn, format(printf, 1, 2)))
 	die(char const *fmt, ...);
 
 static void *__attribute__((malloc)) xmalloc(size_t size);
-static void *__attribute__((malloc)) xcalloc(size_t size);
 static void xrealloc(void *ptrp, size_t size);
-static void xpoll(struct pollfd *pfd, unsigned npolls);
-static int xfpoll(struct pollfd *pfd, unsigned npolls, struct input_st *input);
+static int xpoll(struct pollfd *pfd, unsigned npolls);
+static int xfpoll(struct pollfd *pfd,unsigned npolls, struct input_st *input);
 static int xread(int fd, unsigned char *buf, size_t sbuf, size_t *nreadp);
-static int xpwritev(int fd, struct iovec const *iov, unsigned niov,
+static int xpwritev(int fd, struct iovec *iov, unsigned niov,
 	off_t offset, int seek);
 
 static int is_connection_error(
@@ -330,7 +411,7 @@ static int is_connection_error(
 static int is_iscsi_error(
 	struct iscsi_context *iscsi, struct scsi_task *task,
 	char const *op, int status);
-static void run_iscsi_event_loop(struct iscsi_context *iscsi,
+static int run_iscsi_event_loop(struct iscsi_context *iscsi,
 	unsigned events);
 
 static void add_output_chunk(struct chunk_st *chunk);
@@ -344,15 +425,21 @@ static void chunk_written(struct iscsi_context *iscsi, int status,
 	void *command_data, void *private_data);
 static void chunk_read(struct iscsi_context *iscsi, int status,
 	void *command_data, void *private_data);
-static void restart_requests(struct input_st *input);
-static void start_iscsi_read_requests(struct input_st *input);
+static int restart_requests(struct input_st *input,
+	callback_t read_cb, callback_t write_cb);
+static int start_iscsi_read_requests(struct input_st *input,
+	callback_t read_cb);
 
 static void free_chunks(struct chunk_st *chunk);
 static void free_surplus_unused_chunks(struct input_st *input);
 static void reduce_maxreqs(struct endpoint_st *endp, char const *which);
 static void return_chunk(struct chunk_st *chunk);
+static void take_chunk(struct chunk_st *chunk);
 static void chunk_failed(struct chunk_st *chunk);
-static void create_chunks(struct input_st *input, unsigned nchunks);
+
+static void done_input(struct input_st *input);
+static int init_input(struct input_st *input, struct output_st *output,
+	struct endpoint_st *src, struct endpoint_st *dst);
 
 static void endpoint_connected(struct iscsi_context *iscsi, int status,
 	void *command_data, void *private_data);
@@ -362,6 +449,7 @@ static int reconnect_endpoint(struct endpoint_st *endp,
 	char const *initiator);
 
 static void destroy_endpoint(struct endpoint_st *endp);
+static int stat_endpoint(struct endpoint_st *endp, char const *which);
 static int init_endpoint(struct endpoint_st *endp, char const *which,
 	char const *initiator, char const *url);
 
@@ -388,10 +476,14 @@ static unsigned Opt_request_retry_time  = DFLT_ISCSI_REQUEST_RETRY_PAUSE;
 static unsigned Opt_maxreqs_degradation = DFLT_ISCSI_MAXREQS_DEGRADATION;
 /* }}} */
 
-/* For diagnostic output.  $Info is the FILE on which informational messages
- * like progress are printed.  $Basename is used in error reporting. */
+/*
+ * For diagnostic output.  $Info is the FILE on which informational messages
+ * like progress are printed.  $Basename is used in error reporting.  It is
+ * set up for sexywrap by default, but if we're sexycat, that's changed in
+ * main() right away.
+ */
 static FILE *Info;
-static char const *Basename;
+static char const *Basename = "sexywrap";
 
 /* Program code */
 void usage(void)
@@ -402,6 +494,9 @@ void usage(void)
 		"[-r <retry-pause>] [-R <request-degradation>] "
 		"[-bB <batch-size>] "
 		"[-i <initiator>] [-N] "
+#ifdef SEXYWRAP
+		"[-x <program> [<args>...]] "
+#endif
 		"[-sS <source>] [-O] [-dD <destination>]\n",
 		Basename);
 	puts("The source code of this program is available at "
@@ -411,6 +506,13 @@ void usage(void)
 
 void warnv(char const *fmt, va_list *args)
 {
+#ifdef SEXYWRAP
+	/* It's possible, though unlikely that the program
+	 * we're preloaded to cleared $stderr. */
+	if (!stderr)
+		return;
+#endif
+
 	fprintf(stderr, "%s: ", Basename);
 	vfprintf(stderr, fmt, *args);
 	putc('\n', stderr);
@@ -427,11 +529,19 @@ void warn(char const *fmt, ...)
 
 void warn_errno(char const *op)
 {
+#ifdef SEXYWRAP
+	if (!stderr)
+		return;
+#endif
 	fprintf(stderr, "%s: %s: %m\n", Basename, op);
 }
 
 void warn_iscsi(char const *op, struct iscsi_context *iscsi)
 {
+#ifdef SEXYWRAP
+	if (!stderr)
+		return;
+#endif
 	if (op)
 		fprintf(stderr, "%s: %s: %s\n", Basename, op,
 			iscsi_get_error(iscsi));
@@ -464,85 +574,79 @@ void *xmalloc(size_t size)
 	return ptr;
 }
 
-void *xcalloc(size_t size)
-{
-	void *ptr;
-
-	if ((ptr = xmalloc(size)) != NULL)
-		memset(ptr, 0, size);
-
-	return ptr;
-}
-
 void xrealloc(void *ptrp, size_t size)
 {
 	void *ptr;
 
 	ptr = *(void **)ptrp;
 	if (!(ptr = realloc(ptr, size)))
-		die("remalloc(%zu): %m\n", size);
+		die("remalloc(%zu): %m", size);
 	*(void **)ptrp = ptr;
 }
 
-void xpoll(struct pollfd *pfd, unsigned npolls)
+/* On failure $errno is set. */
+int xpoll(struct pollfd *pfd, unsigned npolls)
 {
 	int ret;
 
 	for (;;)
 	{
 		if ((ret = poll(pfd, npolls, -1)) > 0)
-			return;
-		assert(ret < 0);
-		if (errno != EINTR)
-			die("poll: %m");
+			return ret;
+		if (ret < 0 && errno == EINTR)
+			continue;
+		if (!ret) /* ??? */
+			errno = ENODATA;
+		return 0;
 	}
 }
 
+/* On failure $errno is set. */
 int xfpoll(struct pollfd *pfd, unsigned npolls, struct input_st *input)
 {
-	int timeout, ret;
-	struct timespec then, now;
+	int ret, eintr;
 
-	if (input->failed)
-	{
-		timeout = input->failed->time_to_retry;
-		clock_gettime(CLOCK_MONOTONIC, &then);
-	} else
-		timeout = -1;
+	/* If we don't have failed chunks we can wait indefinitely
+	 * and we won't have to update any chunk_st::time_to_retry:es. */
+	if (!input->failed)
+		return xpoll(pfd, npolls) ? 1 : -1;
 
-	for (;;)
+	/* poll() as long as it returns EINTR. */
+	do
 	{
-		if ((ret = poll(pfd, npolls, timeout)) >= 0)
-			break;
-		if (errno != EINTR)
-			die("poll: %m");
-	}
-
-	if (input->failed)
-	{
-		unsigned diff;
+		unsigned timeout, diff;
+		struct timespec from, now;
 		struct chunk_st *chunk;
 		const unsigned ms_per_sec = 1000;
 		const unsigned long ns_per_ms = 1000000;
 
-		/* $diff := $now - $then */
+		/* Measure the time beteen the entry and exit from poll() */
+		timeout = input->failed->time_to_retry;
+		clock_gettime(CLOCK_MONOTONIC, &from);
+		ret = poll(pfd, npolls, timeout);
+		eintr = ret < 0 && errno == EINTR;
 		clock_gettime(CLOCK_MONOTONIC, &now);
-		diff = (now.tv_sec - then.tv_sec) * ms_per_sec;
-		if (now.tv_nsec < then.tv_nsec)
-			diff += ms_per_sec;
-		diff += (now.tv_nsec - then.tv_nsec) / ns_per_ms;
 
-		/* Discount $diff milliseconds from all failed chunks. */
+		/* $diff := $now - $from */
+		diff = (now.tv_sec - from.tv_sec) * ms_per_sec;
+		if (now.tv_nsec < from.tv_nsec)
+			diff += ms_per_sec;
+		diff += (now.tv_nsec - from.tv_nsec) / ns_per_ms;
+
+		/* Subtract the elapsed time from all failed chunks. */
 		for (chunk = input->failed; chunk; chunk = chunk->next)
 			if (chunk->time_to_retry > diff)
 				chunk->time_to_retry -= diff;
 			else
 				chunk->time_to_retry = 0;
-	}
+	} while (ret < 0 && eintr);
 
-	return ret != 0;
+	return ret;
 }
 
+/* Try to fill $buf with $sbuf bytes from $fd, but no hard promises.
+ * On error $errno is set and 0 is returned.  Otherwise 1 is returned
+ * and the number of bytes actually read is stored in *$nreadp. */
 int xread(int fd, unsigned char *buf, size_t sbuf, size_t *nreadp)
 {
 	*nreadp = 0;
@@ -553,7 +657,7 @@ int xread(int fd, unsigned char *buf, size_t sbuf, size_t *nreadp)
 		n = read(fd, &buf[*nreadp], sbuf - *nreadp);
 		if (n > 0)
 			*nreadp += n;
-		else if (n == 0)
+		else if (n == 0 || errno == ESPIPE)
 			return 1;
 		else if (errno != EAGAIN && errno != EINTR
 				&& errno != EWOULDBLOCK)
@@ -563,20 +667,52 @@ int xread(int fd, unsigned char *buf, size_t sbuf, size_t *nreadp)
 	return 1;
 }
 
-int xpwritev(int fd, struct iovec const *iov, unsigned niov, off_t offset,
-	int seek)
+/* Writes the full $iov to $fd.  On error 0 is returned and $errno is set. */
+int xpwritev(int fd, struct iovec *iov, unsigned niov, off_t offset, int seek)
 {
-	int ret;
-
+	/* Return right away if there's nothing to write. */
 	assert(fd >= 0);
-	ret = seek
-		? niov > 1
-			? pwritev(fd, iov, niov, offset)
-			: pwrite(fd, iov[0].iov_base, iov[0].iov_len, offset)
-		: niov > 1
-			? writev(fd, iov, niov)
-			: write(fd, iov[0].iov_base, iov[0].iov_len);
-	return ret > 0;
+	assert(niov > 0);
+
+	/* Write until all of $iov is written out. */
+	for (;;)
+	{
+		int ret;
+
+		ret = seek
+			? niov > 1
+				? pwritev(fd, iov, niov, offset)
+				: pwrite(fd, iov[0].iov_base, iov[0].iov_len,
+					offset)
+			: niov > 1
+				? writev(fd, iov, niov)
+				: write(fd, iov[0].iov_base, iov[0].iov_len);
+		if (ret < 0)
+		{
+			if (errno != EAGAIN && errno != EINTR
+					&& errno != EWOULDBLOCK)
+				return 0;
+			continue;
+		}
+
+		if (seek)
+			offset += ret;
+
+		/* Skip $iov:s we've just written. */
+		while (ret >= iov->iov_len)
+		{
+			ret -= iov->iov_len;
+			iov++;
+			niov--;
+			if (!niov)
+				/* We've written out everything. */
+				return 1;
+		}
+
+		/* We need to write more. */
+		iov->iov_len -= ret;
+		iov->iov_base += ret;
+	}
 }
 
 int is_connection_error(struct iscsi_context *iscsi, char const *which,
@@ -587,6 +723,8 @@ int is_connection_error(struct iscsi_context *iscsi, char const *which,
 
 	if (!(revents & (POLLERR|POLLHUP|POLLRDHUP)))
 		return 0;
+	if (!which)
+		return 1;
 
 	serror = sizeof(error);
 	if (!(revents & POLLERR))
@@ -615,13 +753,14 @@ int is_iscsi_error(struct iscsi_context *iscsi, struct scsi_task *task,
 	return 1;
 }
 
-void run_iscsi_event_loop(struct iscsi_context *iscsi, unsigned events)
+int run_iscsi_event_loop(struct iscsi_context *iscsi, unsigned events)
 {
 	if (iscsi_service(iscsi, events) != 0)
 	{
 		warn_iscsi(NULL, iscsi);
-		die(NULL);
-	}
+		return 0;
+	} else
+		return 1;
 }
 
 void add_output_chunk(struct chunk_st *chunk)
@@ -634,7 +773,7 @@ void add_output_chunk(struct chunk_st *chunk)
 	{
 		unsigned n;
 
-		/* Allocate +25% */
+		/* We've used up all $output->tasks.  Allocate +25% */
 		n = output->max + output->max/4;
 		xrealloc(&output->tasks, sizeof(*output->tasks) * n);
 		xrealloc(&output->iov, sizeof(*output->iov) * n);
@@ -679,7 +818,9 @@ int process_output_queue(int fd,
 
 	/*
 	 * $niov	:= the number of buffers in the current batch
-	 * $first	:= the output offset of the batch
+	 * $first	:= the first block in the batch; if it's
+	 *		   $output->top_block, then the bathc can be flushed
+	 *		   without seeking
 	 * $block	:= the next block we expect in the batch
 	 * $tasks	:= where to take from the next buffer of the batch
 	 * $ntasks	:= how many buffers till the end of $output->tasks
@@ -785,8 +926,15 @@ void chunk_written(struct iscsi_context *iscsi, int status,
 	struct chunk_st *chunk = private_data;
 	struct input_st *input = chunk->input;
 
-	assert(!REMOTE_TO_LOCAL(input));
-	assert(LOCAL_TO_REMOTE(input) || chunk->read_task);
+	assert(task != NULL);
+	assert(chunk != NULL);
+
+	if (!LOCAL_TO_REMOTE(input))
+	{
+		assert(REMOTE_TO_REMOTE(input));
+		assert(chunk->read_task);
+	}
+
 	assert(input->output->nreqs > 0);
 	input->output->nreqs--;
 
@@ -799,12 +947,12 @@ void chunk_written(struct iscsi_context *iscsi, int status,
 		scsi_free_scsi_task(task);
 
 	if (Opt_write_progress && !(chunk->srcblock % Opt_write_progress))
-		fprintf(Info, "source block %u copied\n", chunk->srcblock);
+		info("source block %u copied", chunk->srcblock);
 
 	chunk->srcblock = 0;
 	assert(!chunk->time_to_retry);
-	if (!LOCAL_TO_REMOTE(input))
-	{	/* remote_to_remote() */
+	if (REMOTE_TO_REMOTE(input))
+	{
 		scsi_free_scsi_task(chunk->read_task);
 		chunk->read_task = NULL;
 	}
@@ -818,8 +966,13 @@ void chunk_read(struct iscsi_context *iscsi, int status,
 	struct chunk_st *chunk = private_data;
 	struct endpoint_st *dst = chunk->input->dst;
 
+	assert(chunk != NULL);
 	assert(!LOCAL_TO_REMOTE(chunk->input));
 	assert(!chunk->read_task);
+
+	assert(task != NULL);
+	assert(LBA_OF(task) == chunk->srcblock);
+
 	assert(chunk->input->nreqs > 0);
 	chunk->input->nreqs--;
 
@@ -830,28 +983,35 @@ void chunk_read(struct iscsi_context *iscsi, int status,
 		return;
 	}
 
+	chunk->input->nread += task->datain.size;
 	if (Opt_read_progress && !(chunk->srcblock % Opt_read_progress))
-		fprintf(Info, "source block %u read\n", chunk->srcblock);
+		info("source block %u read", chunk->srcblock);
 
 	chunk->read_task = task;
 	assert(!chunk->time_to_retry);
-	if (!REMOTE_TO_LOCAL(chunk->input))
-	{	/* remote_to_remote() */
-		if (!iscsi_write10_task(
-			dst->iscsi, dst->url->lun,
-			task->datain.data, task->datain.size,
-			chunk->srcblock, 0, 0, dst->blocksize,
-			chunk_written, chunk))
-		{
-			warn_iscsi("write10", dst->iscsi);
-			die(NULL);
-		} else
-			chunk->input->output->nreqs++;
-	} else	/* remote_to_local() */
+	if (REMOTE_TO_LOCAL(chunk->input))
+	{
 		add_output_chunk(chunk);
+		return;
+	}
+
+	/* REMOTE_TO_REMOTE() */
+	assert(task->datain.size > 0);
+	assert(task->datain.size % dst->blocksize == 0);
+	if (!iscsi_write10_task(
+		dst->iscsi, dst->url->lun,
+		task->datain.data, task->datain.size,
+		chunk->srcblock, 0, 0, dst->blocksize,
+		chunk_written, chunk))
+	{
+		warn_iscsi("write10", dst->iscsi);
+		die(NULL);
+	} else
+		chunk->input->output->nreqs++;
 }
 
-void restart_requests(struct input_st *input)
+int restart_requests(struct input_st *input,
+	callback_t read_cb, callback_t write_cb)
 {
 	struct chunk_st *prev, *chunk, *next;
 	struct output_st *output = input->output;
@@ -860,11 +1020,11 @@ void restart_requests(struct input_st *input)
 
 	/* Do we have anything to do? */
 	if (!(chunk = input->failed))
-		return;
+		return 1;
 
 	/* Can we send any requests at all? */
 	if (!(input->nreqs < src->maxreqs || output->nreqs < dst->maxreqs))
-		return;
+		return 1;
 
 	/* We need to know the current time to tell whether a failed request
 	 * can be retried. */
@@ -886,19 +1046,20 @@ void restart_requests(struct input_st *input)
 				continue;
 			}
 
+			assert(read_cb != NULL);
 			if (Opt_verbosity > 1)
-				fprintf(Info, "re-reading source block %u\n",
+				info("re-reading source block %u",
 					chunk->srcblock);
 			if (!iscsi_read10_task(
 				src->iscsi, src->url->lun,
 				chunk->srcblock, src->blocksize,
-				src->blocksize, chunk_read, chunk))
+				src->blocksize, read_cb, chunk))
 			{	/* It must be some fatal error, eg. OOM. */
 				warn_iscsi("read10", src->iscsi);
-				die(NULL);
+				return 0;
 			} else
 				input->nreqs++;
-		} else	/* LOCAL_TO_REMOTE() || chunk->read_task != NULL */
+		} else	/* LOCAL_TO_REMOTE() || $chunk->read_task */
 		{	/* Rewrite */
 			size_t sbuf;
 			unsigned char *buf;
@@ -911,27 +1072,32 @@ void restart_requests(struct input_st *input)
 			}
 
 			if (Opt_verbosity > 1)
-				fprintf(Info, "rewriting source block %u\n",
+				info("rewriting source block %u",
 					chunk->srcblock);
 
-			if (LOCAL_TO_REMOTE(input))
+			if (IS_SEXYWRAP(input))
+			{	/* $buf points to some user buffer. */
+				buf  = chunk->wbuf;
+				sbuf = dst->blocksize;
+			} else if (LOCAL_TO_REMOTE(input))
 			{	/* In this mode the buffer comes right after
 				 * the struct chunk_st. */
-				buf  = chunk->buf;
+				buf  = chunk->rbuf;
 				sbuf = dst->blocksize;
 			} else
-			{	/* remote_to_remote() */
+			{	/* REMOTE_TO_REMOTE() */
 				buf  = chunk->read_task->datain.data;
 				sbuf = chunk->read_task->datain.size;
 			}
 
+			assert(write_cb != NULL);
 			if (!iscsi_write10_task(
 				dst->iscsi, dst->url->lun,
 				buf, sbuf, chunk->srcblock, 0, 0,
-				dst->blocksize, chunk_written, chunk))
+				dst->blocksize, write_cb, chunk))
 			{	/* Incorrectible error. */
 				warn_iscsi("write10", dst->iscsi);
-				die(NULL);
+				return 0;
 			} else
 				output->nreqs++;
 		}
@@ -951,9 +1117,11 @@ void restart_requests(struct input_st *input)
 		if (chunk == input->last_failed)
 			input->last_failed = prev;
 	} while ((chunk = next) != NULL);
+
+	return 1;
 }
 
-void start_iscsi_read_requests(struct input_st *input)
+int start_iscsi_read_requests(struct input_st *input, callback_t read_cb)
 {
 	struct endpoint_st *src = input->src;
 
@@ -961,7 +1129,7 @@ void start_iscsi_read_requests(struct input_st *input)
 	assert(!LOCAL_TO_REMOTE(input));
 	while (input->unused
 		&& input->nreqs < src->maxreqs
-		&& input->top_block < src->nblocks)
+		&& input->top_block < input->until)
 	{
 		struct chunk_st *chunk;
 
@@ -972,38 +1140,43 @@ void start_iscsi_read_requests(struct input_st *input)
 		if (Opt_verbosity > 2
 				&& Opt_read_progress
 				&& !(input->top_block % Opt_read_progress))
-			fprintf(Info, "reading source block %u\n",
-				input->top_block);
+			info("reading source block %u", input->top_block);
 
 		if (!iscsi_read10_task(
 			src->iscsi, src->url->lun,
 			input->top_block, src->blocksize,
-			src->blocksize, chunk_read, chunk))
+			src->blocksize, read_cb, chunk))
 		{
 			warn_iscsi("read10", src->iscsi);
-			die(NULL);
+			return 0;
 		}
 		chunk->srcblock = input->top_block++;
 
 		/* Detach $chunk from $input->unused. */
 		input->nreqs++;
-		input->nunused--;
-		input->unused = chunk->next;
-		chunk->next = NULL;
+		take_chunk(chunk);
 	} /* read until there are no $input->unused chunks left */
+
+	return 1;
 }
 
+/* Preserves $errno. */
 void free_chunks(struct chunk_st *chunk)
 {
+	int serrno;
+
+	serrno = errno;
 	while (chunk)
 	{
 		struct chunk_st *next;
 
 		next = chunk->next;
-		if (!LOCAL_TO_REMOTE(chunk->input) && chunk->read_task)
+		if (REMOTE_TO_REMOTE(chunk->input) && chunk->read_task)
 			scsi_free_scsi_task(chunk->read_task);
+		free(chunk);
 		chunk = next;
 	}
+	errno = serrno;
 }
 
 void free_surplus_unused_chunks(struct input_st *input)
@@ -1012,7 +1185,11 @@ void free_surplus_unused_chunks(struct input_st *input)
 	struct chunk_st *chunk;
 
 	/* Free $input->unused until $input->nunused drops to $maxreqs. */
-	maxreqs = input->src->maxreqs + input->dst->maxreqs;
+	maxreqs = 0;
+	if (input->src)
+		maxreqs += input->src->maxreqs;
+	if (input->dst)
+		maxreqs += input->dst->maxreqs;
 	assert(maxreqs >= 1);
 	while (input->nunused > maxreqs)
 	{
@@ -1047,8 +1224,8 @@ void reduce_maxreqs(struct endpoint_st *endp, char const *which)
 	endp->maxreqs = maxreqs;
 
 	if (which)
-		fprintf(Info, "%s target: number of maximal "
-			"outstanding requests reduced to %u\n",
+		info("%s target: number of maximal "
+			"outstanding requests reduced to %u",
 			which, endp->maxreqs);
 }
 
@@ -1059,6 +1236,14 @@ void return_chunk(struct chunk_st *chunk)
 	chunk->next = input->unused;
 	input->unused = chunk;
 	input->nunused++;
+}
+
+void take_chunk(struct chunk_st *chunk)
+{
+	assert(chunk->input->nunused > 0);
+	chunk->input->nunused--;
+	chunk->input->unused = chunk->next;
+	chunk->next = NULL;
 }
 
 void chunk_failed(struct chunk_st *chunk)
@@ -1083,9 +1268,25 @@ void chunk_failed(struct chunk_st *chunk)
 	chunk->time_to_retry = Opt_request_retry_time;
 }
 
-void create_chunks(struct input_st *input, unsigned nchunks)
+/* Preserves $errno. */
+void done_input(struct input_st *input)
 {
+	free_chunks(input->unused);
+	free_chunks(input->failed);
+	input->unused = input->failed = NULL;
+}
+
+/* On error 0 is returned and $errno is set.  Otherwise 1 is returned. */
+int init_input(struct input_st *input, struct output_st *output,
+	struct endpoint_st *src, struct endpoint_st *dst)
+{
+	unsigned nchunks;
 	size_t inline_buf_size;
+
+	memset(input, 0, sizeof(*input));
+	input->src = src;
+	input->dst = dst;
+	input->output = output;
 
 	/*
 	 * If we're copying a local file to a remote target the input buffer
@@ -1094,18 +1295,35 @@ void create_chunks(struct input_st *input, unsigned nchunks)
 	 * the space allocated for the $read_task pointer, because its size
 	 * is included in the size of the structure.
 	 */
-	assert(!LOCAL_TO_REMOTE(input)
-		|| input->dst->blocksize > sizeof(struct scsi_task *));
-	inline_buf_size = LOCAL_TO_REMOTE(input)
-		? input->dst->blocksize - sizeof(struct scsi_task *): 0;
+	if (!IS_SEXYWRAP(input) && LOCAL_TO_REMOTE(input))
+	{
+		assert(dst->blocksize > sizeof(struct scsi_task *));
+		inline_buf_size = dst->blocksize - sizeof(struct scsi_task *);
+	} else
+		inline_buf_size = 0;
+
+	/* Create $input->input chunks. */
+	nchunks = 0;
+	if (src)
+		nchunks += src->maxreqs;
+	if (dst)
+		nchunks += dst->maxreqs;
 	for (; nchunks > 0; nchunks--)
 	{
 		struct chunk_st *chunk;
 
-		chunk = xcalloc(sizeof(*chunk) + inline_buf_size);
+		if (!(chunk = malloc(sizeof(*chunk) + inline_buf_size)))
+		{
+			free_chunks(input->unused);
+			return 0;
+		} else
+			memset(chunk, 0, sizeof(*chunk) + inline_buf_size);
+
 		chunk->input = input;
 		return_chunk(chunk);
 	} /* until $nchunks unused chunks are created */
+
+	return 1;
 }
 
 void endpoint_connected(struct iscsi_context *iscsi, int status,
@@ -1136,12 +1354,16 @@ int connect_endpoint(struct iscsi_context *iscsi, struct iscsi_url *url)
 
 		pfd.fd = iscsi_get_fd(iscsi);
 		pfd.events = iscsi_which_events(iscsi);
-		xpoll(&pfd, MEMBS_OF(&pfd));
-
-		run_iscsi_event_loop(iscsi, pfd.revents);
-		if (!connected)
+		if (!xpoll(&pfd, MEMBS_OF(&pfd)))
 		{
-			warn("connect: %s: %s: %s\n",
+			warn_errno("poll");
+			return 0;
+		} else if (!run_iscsi_event_loop(iscsi, pfd.revents))
+		{	/* run_iscsi_event_loop() has logged the error. */
+			return 0;
+		} else if (!connected)
+		{
+			warn("connect: %s: %s: %s",
 				url->portal, url->target,
 				iscsi_get_error(iscsi));
 			return 0;
@@ -1178,41 +1400,22 @@ void destroy_endpoint(struct endpoint_st *endp)
 	}
 }
 
-int init_endpoint(struct endpoint_st *endp, char const *which,
-	char const *initiator, char const *url)
+int stat_endpoint(struct endpoint_st *endp, char const *which)
 {
 	struct scsi_task *task;
 	struct scsi_readcapacity10 *cap;
 	struct scsi_inquiry_block_limits *__attribute__((unused)) inq;
-
-	/* Create $endp->iscsi and connect to $endp->url. */
-	if (!(endp->iscsi = iscsi_create_context(initiator)))
-	{
-		warn_errno("iscsi_create_context()");
-		return 0;
-	} else if (!(endp->url = iscsi_parse_full_url(endp->iscsi, url)))
-	{
-		warn_iscsi(NULL, endp->iscsi);
-		destroy_endpoint(endp);
-		return 0;
-	} else if (!connect_endpoint(endp->iscsi, endp->url))
-	{
-		destroy_endpoint(endp);
-		return 0;
-	}
 
 	/* Get the endpoint's nblocks and blocksize. */
 	if (!(task = iscsi_readcapacity10_sync(endp->iscsi, endp->url->lun,
 		0, 0)))
 	{
 		warn_iscsi("readcapacity10", endp->iscsi);
-		destroy_endpoint(endp);
 		return 0;
 	} else if (task->status != SCSI_STATUS_GOOD
 		|| !(cap = scsi_datain_unmarshall(task)))
 	{
 		warn_errno("readcapacity10");
-		destroy_endpoint(endp);
 		return 0;
 	}
 
@@ -1221,7 +1424,9 @@ int init_endpoint(struct endpoint_st *endp, char const *which,
 	endp->blocksize = cap->block_size;
 	if (endp->blocksize < 512)
 	{
-		warn("%s target reported blocksize=0, ignored\n", which);
+		if (Opt_verbosity > 0)
+			warn("%s target reported blocksize=0, ignored",
+				which);
 		endp->blocksize = 512;
 	}
 	endp->nblocks = cap->lba + 1;
@@ -1280,16 +1485,39 @@ int init_endpoint(struct endpoint_st *endp, char const *which,
 	}
 #endif  /* SCSI_INQUIRY_PAGECODE_BLOCK_LIMITS */
 
-	if (Opt_verbosity > 0)
-		fprintf(Info, "%s target: blocksize=%u, nblocks=%u\n",
+	return 1;
+}
+
+int init_endpoint(struct endpoint_st *endp, char const *which,
+	char const *initiator, char const *url)
+{
+	/* Create $endp->iscsi and connect to $endp->url. */
+	if (!(endp->iscsi = iscsi_create_context(initiator)))
+	{
+		warn_errno("iscsi_create_context()");
+		return 0;
+	} else if (!(endp->url = iscsi_parse_full_url(endp->iscsi, url)))
+	{
+		warn_iscsi(NULL, endp->iscsi);
+		destroy_endpoint(endp);
+		return 0;
+	} else if (!connect_endpoint(endp->iscsi, endp->url)
+		|| !stat_endpoint(endp, which))
+	{
+		destroy_endpoint(endp);
+		return 0;
+	} else if (Opt_verbosity > 0)
+		info("%s target: blocksize=%u, nblocks=%u",
 			which, endp->blocksize, endp->nblocks);
 
 	return 1;
 }
 
+#ifdef SEXYCAT
 int local_to_remote(char const *initiator, struct input_st *input)
 {
-	int eof;
+	off_t maxwrite;
+	int eof, overflow;
 	struct pollfd pfd[2];
 	struct endpoint_st *src = input->src;
 	struct endpoint_st *dst = input->dst;
@@ -1305,58 +1533,63 @@ int local_to_remote(char const *initiator, struct input_st *input)
 		return 0;
 	}
 
-	eof = 0;
+	eof = overflow = 0;
 	pfd[1].fd = iscsi_get_fd(dst->iscsi);
+	maxwrite = dst->blocksize * dst->nblocks;
 	for (;;)
 	{
-		restart_requests(input);
+		int ret;
+
+		if (!restart_requests(input, NULL, chunk_written))
+			return 0;
 		if (eof && !input->output->nreqs && !input->failed)
 			break;
 
 		pfd[0].events = !eof && input->unused ? POLLIN : 0;
 		pfd[1].events = iscsi_which_events(dst->iscsi);
-		if (!xfpoll(pfd, MEMBS_OF(pfd), input))
+		if ((ret = xfpoll(pfd, MEMBS_OF(pfd), input)) < 0)
+		{
+			warn_errno("poll");
+			return 0;
+		} else if (!ret)
 			continue;
 
-		if (pfd[0].revents)
-		{
+		if (pfd[0].revents & POLLIN)
+		{	/* We must have been waiting for POLLIN. */
 			size_t n;
 			struct chunk_st *chunk;
 
-			assert(!eof);
+			assert(input->unused != NULL);
 			chunk = input->unused;
-			assert(chunk != NULL);
-			if (!xread(pfd[0].fd, chunk->buf, dst->blocksize, &n))
+			if (!xread(pfd[0].fd,chunk->rbuf,dst->blocksize,&n))
 			{
 				warn_errno(src->fname
 					? src->fname : "(stdin)");
 				return 0;
 			}
 
-			/* Have we read less than expected? */
-			if (n < dst->blocksize)
-				eof = 1;
+			/* Make sure we're within the target's capacity. */
+			if (n > maxwrite)
+			{	/* Can't write as much as $n bytes. */
+				overflow = 1;
+				n = maxwrite;
+				if (n < dst->blocksize)
+					/* Can't write anything more. */
+					n = 0;
+			}
 
 			if (n > 0)
 			{	/* Remove $chunk from $input->unused. */
-				input->nunused--;
-				input->unused = chunk->next;
-				chunk->next = NULL;
+				take_chunk(chunk);
 				chunk->srcblock = input->top_block++;
 
-				assert(n <= dst->blocksize);
-				if (n < dst->blocksize)
-				{
-					warn("source block %u "
-						"padded with zeroes",
-						chunk->srcblock);
-					memset(&chunk->buf[n], 0,
-						dst->blocksize - n);
-				}
+				assert(n >= dst->blocksize);
+				assert(n <= maxwrite);
+				maxwrite -= n;
 
 				if (!iscsi_write10_task(
 					dst->iscsi, dst->url->lun,
-					chunk->buf, dst->blocksize,
+					chunk->rbuf, dst->blocksize,
 					chunk->srcblock, 0, 0,
 					dst->blocksize, chunk_written, chunk))
 				{
@@ -1364,27 +1597,39 @@ int local_to_remote(char const *initiator, struct input_st *input)
 					die(NULL);
 				} else
 					input->output->nreqs++;
-			}
+			} else /* We didn't read anything. */
+				eof = 1;
 		}
+
+		if (pfd[0].revents & (POLLHUP|POLLRDHUP))
+			eof = 1;
 
 		if (!is_connection_error(dst->iscsi, "destination",
 			pfd[1].revents))
 		{
-			run_iscsi_event_loop(dst->iscsi, pfd[1].revents);
-			free_surplus_unused_chunks(input);
-		} else if (reconnect_endpoint(dst, initiator))
-		{
-			reduce_maxreqs(dst, "destination");
+			if (!run_iscsi_event_loop(dst->iscsi, pfd[1].revents))
+				return 0;
 			free_surplus_unused_chunks(input);
 		} else
-			return 0;
+		{
+			if (!reconnect_endpoint(dst, initiator))
+				return 0;
+			reduce_maxreqs(dst, "destination");
+			free_surplus_unused_chunks(input);
+		}
 	} /* until $eof is reached and everything is written out */
 
 	/* Close the input file if we opened it. */
 	if (!src->fname)
 		close(pfd[0].fd);
 
-	return 1;
+	if (overflow)
+	{
+		warn("only %ld bytes could be written",
+			dst->blocksize * dst->nblocks - maxwrite);
+		return 0;
+	} else
+		return 1;
 }
 
 int remote_to_local(char const *initiator, struct input_st *input,
@@ -1420,10 +1665,13 @@ int remote_to_local(char const *initiator, struct input_st *input,
 	pfd[0].fd = iscsi_get_fd(src->iscsi);
 	for (;;)
 	{
-		int eof;
+		int eof, ret;
 
-		restart_requests(input);
-		start_iscsi_read_requests(input);
+		if (!restart_requests(input, chunk_read, NULL))
+			return 0;
+		if (!start_iscsi_read_requests(input, chunk_read))
+			return 0;
+
 		eof = !input->nreqs && !input->failed;
 		if (eof && !input->output->enqueued)
 			break;
@@ -1432,18 +1680,25 @@ int remote_to_local(char const *initiator, struct input_st *input,
 		pfd[1].events = process_output_queue(-1, dst, input->output,
 					!eof)
 			? POLLOUT : 0;
-		if (!xfpoll(pfd, MEMBS_OF(pfd), input))
+		if ((ret = xfpoll(pfd, MEMBS_OF(pfd), input)) < 0)
+		{
+			warn_errno("poll");
+			return 0;
+		} else if (!ret)
 			continue;
 
 		if (!is_connection_error(src->iscsi, "source",
-				pfd[0].revents))
-			run_iscsi_event_loop(src->iscsi, pfd[0].revents);
-		else if (reconnect_endpoint(src, initiator))
+			pfd[0].revents))
 		{
+			if (!run_iscsi_event_loop(src->iscsi, pfd[0].revents))
+				return 0;
+		} else
+		{
+			if (!reconnect_endpoint(src, initiator))
+				return 0;
 			reduce_maxreqs(src, "source");
 			free_surplus_unused_chunks(input);
-		} else
-			return 0;
+		}
 
 		if (pfd[1].revents)
 		{
@@ -1452,6 +1707,9 @@ int remote_to_local(char const *initiator, struct input_st *input,
 			free_surplus_unused_chunks(input);
 		}
 	}
+
+	assert(input->top_block == input->until);
+	assert(input->nread == (off_t)src->blocksize * src->nblocks);
 
 	/* Close the input file if we opened it. */
 	if (!dst->fname)
@@ -1470,40 +1728,54 @@ int remote_to_remote(char const *initiator, struct input_st *input)
 	pfd[1].fd = iscsi_get_fd(dst->iscsi);
 	for (;;)
 	{
-		restart_requests(input);
-		start_iscsi_read_requests(input);
+		int ret;
 
+		if (!restart_requests(input, chunk_read, chunk_written))
+			return 0;
+		if (!start_iscsi_read_requests(input, chunk_read))
+			return 0;
 		if (!input->nreqs && !input->output->nreqs && !input->failed)
 			break;
 
 		pfd[0].events = iscsi_which_events(src->iscsi);
 		pfd[1].events = iscsi_which_events(dst->iscsi);
-		if (!xfpoll(pfd, MEMBS_OF(pfd), input))
+		if ((ret = xfpoll(pfd, MEMBS_OF(pfd), input)) < 0)
+		{
+			warn_errno("poll");
+			return 0;
+		} else if (!ret)
 			continue;
 
 		if (!is_connection_error(src->iscsi, "source",
-				pfd[0].revents))
-			run_iscsi_event_loop(src->iscsi, pfd[0].revents);
-		else if (reconnect_endpoint(src, initiator))
+			pfd[0].revents))
 		{
+			if (!run_iscsi_event_loop(src->iscsi, pfd[0].revents))
+				return 0;
+		} else
+		{
+			if (!reconnect_endpoint(src, initiator))
+				return 0;
 			reduce_maxreqs(src, "source");
 			free_surplus_unused_chunks(input);
-		} else
-			return 0;
+		}
 
 		if (!is_connection_error(dst->iscsi, "destination",
 			pfd[1].revents))
 		{
-			run_iscsi_event_loop(dst->iscsi, pfd[1].revents);
-			free_surplus_unused_chunks(input);
-		} else if (reconnect_endpoint(dst, initiator))
-		{
-			reduce_maxreqs(dst, "destination");
+			if (!run_iscsi_event_loop(dst->iscsi, pfd[1].revents))
+				return 0;
 			free_surplus_unused_chunks(input);
 		} else
-			return 0;
+		{
+			if (!reconnect_endpoint(dst, initiator))
+				return 0;
+			reduce_maxreqs(dst, "destination");
+			free_surplus_unused_chunks(input);
+		}
 	}
 
+	assert(input->top_block == input->until);
+	assert(input->nread == (off_t)src->blocksize * src->nblocks);
 	return 1;
 }
 
@@ -1539,11 +1811,7 @@ int main(int argc, char *argv[])
 	 * from $input: $input.output, $input.src, $input.dst. */
 	memset(&src, 0, sizeof(src));
 	memset(&dst, 0, sizeof(dst));
-	memset(&input, 0, sizeof(input));
 	memset(&output, 0, sizeof(output));
-	input.src = &src.endp;
-	input.dst = &dst.endp;
-	input.output = &output;
 
 	/* Parse the command line */
 	nop = 0;
@@ -1561,13 +1829,19 @@ int main(int argc, char *argv[])
 	} else
 		src.url = dst.url = NULL;
 
-	optstring = "hvqi:Ns:S:p:m:d:D:P:OM:b:B:r:R:";
+#ifdef SEXYWRAP
+# define SEXYWRAP_CMDLINE			"x:"
+#else
+# define SEXYWRAP_CMDLINE			/* none */
+#endif
+	optstring = "hvqi:Ns:S:p:m:d:D:P:OM:b:B:r:R:" SEXYWRAP_CMDLINE ;
+
 	while ((optchar = getopt(argc, argv, optstring)) != EOF)
 		switch (optchar)
 		{
 		case 'h':
 			usage();
-			return 0;
+			exit(0);
 
 		case 'v':
 			Opt_verbosity++;
@@ -1638,9 +1912,62 @@ int main(int argc, char *argv[])
 			Opt_max_output_queue = atoi(optarg);
 			break;
 
+#ifdef SEXYWRAP
+		case 'x':
+		{	/* Execute a program preloaded with us. */
+			ssize_t n;
+			char *env;
+			char path[PATH_MAX];
+			char const *preload;
+
+			/* Retrieve our absolute path. */
+			n = readlink("/proc/self/exe", path, sizeof(path));
+			if (n < 0)
+			{
+				warn_errno("readlink");
+				die(NULL);
+			} else if (n >= sizeof(path))
+			{
+				errno = ENAMETOOLONG;
+				warn_errno("readlink");
+				die(NULL);
+			} else	/* readlink() doesn't terminate the string. */
+				path[n] = '\0';
+
+			/* Construct and set a new $LD_PRELOAD. */
+			if ((preload = getenv("LD_PRELOAD")) != NULL)
+			{
+				size_t m;
+
+				m = strlen(preload);
+				env = xmalloc(m + 1 + n + 1);
+				memcpy(env, preload, m);
+				env[m] = ':';
+				memcpy(&env[m+1], path, n);
+				env[m+1+n] = '\0';
+				setenv("LD_PRELOAD", env, 1);
+				free(env);
+			} else
+				setenv("LD_PRELOAD", path, 1);
+
+			/* Set the $initiator for sexywrap. */
+			if (initiator)
+				setenv("SEXYWRAP_INITIATOR", initiator, 1);
+
+			/* Execute the program. */
+			argv += optind - 1;
+			execvp(optarg, argv);
+			warn_errno(optarg);
+			die(NULL);
+		} /* -x */
+#endif /* SEXYWRAP */
+
 		default:
-			return 1;
+			exit(1);
 		}
+
+	if (argc > optind)
+		die("too many arguments");
 
 	/* Verify that we're not given two local targets. */
 	if (!src.url && !dst.url)
@@ -1701,7 +2028,7 @@ int main(int argc, char *argv[])
 			initiator, dst.url))
 		die(NULL);
 	if (!src.is_local && !dst.is_local)
-	{	/* remote_to_remote().   Unfortunately we can't accept
+	{	/* REMOTE_TO_REMOTE().   Unfortunately we can't accept
 		 * arbitrary blocksizes, because we can't split/merge
 		 * chunks. */
 		if (dst.endp.blocksize > src.endp.blocksize)
@@ -1711,7 +2038,12 @@ int main(int argc, char *argv[])
 			die("source target's blocksize must be a multiply "
 				"of the destination's");
 	}
-	create_chunks(&input, src.endp.maxreqs + dst.endp.maxreqs);
+
+	if (!init_input(&input, &output, &src.endp, &dst.endp))
+		die("malloc: %m");
+	if (!LOCAL_TO_REMOTE(&input))
+		/* Read all blocks of the disk. */
+		input.until = src.endp.nblocks;
 
 	/* Run */
 	if (nop)
@@ -1735,14 +2067,13 @@ int main(int argc, char *argv[])
 	}
 
 	/* Free resources */
-	free_chunks(input.unused);
-	free_chunks(input.failed);
-	input.unused = input.failed = NULL;
+	done_input(&input);
 	destroy_endpoint(&src.endp);
 	destroy_endpoint(&dst.endp);
 
-	return !isok;
+	exit(!isok);
 }
+#endif /* SEXYCAT */
 
 /* vim: set foldmarker={{{,}}} foldmethod=marker: */
 /* End of sexycat.c */
