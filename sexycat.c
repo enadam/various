@@ -34,9 +34,16 @@
  *				Example: sexywrap -x cat <iscsi-url> > ide.
  *
  * Possible <options> are:
- *   -i <initiator-name>	Log in to the iSCSI targets with this IQN.
- *				If not specified some arbitrary identification
- *				is used.
+ *   -i <src-initiator-name>	Log in to the source iSCSI target with this
+ *				IQN.  If left unspecified a hardcoded default
+ *				is used.  Ignored the the source is a local
+ *				file.
+ *   -I <dst-initiator-name>	Log in to the destination iSCSI target with
+ *				this IQN.  If left unspecified the source's
+ *				initiator name is used.  Otherwise if the
+ *				argument is an empty string the same hardeced
+ *				default is used as for <src-initiator-name>.
+ *				Ignored if the destination is a local file.
  *   -N				Don't do any I/O, just connect to the iSCSI
  *				device(s) and log in.
  *   -O				Overwrite the local destination <file-name>.
@@ -236,7 +243,15 @@ struct endpoint_st
 	union
 	{
 		char const *fname;
-		struct iscsi_url *url;
+
+		struct
+		{	/* Order is important, $url must be
+			 * the first member of the structure. */
+			struct iscsi_url *url;
+
+			/* The $initiator name to use for log in to $url. */
+			char const *initiator;
+		};
 	};
 
 	/*
@@ -445,18 +460,16 @@ static void endpoint_connected(struct iscsi_context *iscsi, int status,
 	void *command_data, void *private_data);
 static int connect_endpoint(struct iscsi_context *iscsi,
 	struct iscsi_url *url);
-static int reconnect_endpoint(struct endpoint_st *endp,
-	char const *initiator);
+static int reconnect_endpoint(struct endpoint_st *endp);
 
 static void destroy_endpoint(struct endpoint_st *endp);
 static int stat_endpoint(struct endpoint_st *endp, char const *which);
 static int init_endpoint(struct endpoint_st *endp, char const *which,
-	char const *initiator, char const *url);
+	char const *url);
 
-static int local_to_remote(char const *initiator, struct input_st *input);
-static int remote_to_local(char const *initiator, struct input_st *input,
-	unsigned output_flags);
-static int remote_to_remote(char const *initiator, struct input_st *input);
+static int local_to_remote(struct input_st *input);
+static int remote_to_local(struct input_st *input, unsigned output_flags);
+static int remote_to_remote(struct input_st *input);
 /* }}} */
 
 /* Private variables */
@@ -1373,10 +1386,10 @@ int connect_endpoint(struct iscsi_context *iscsi, struct iscsi_url *url)
 	return 1;
 }
 
-int reconnect_endpoint(struct endpoint_st *endp, char const *initiator)
+int reconnect_endpoint(struct endpoint_st *endp)
 {
 	iscsi_destroy_context(endp->iscsi);
-	if (!(endp->iscsi = iscsi_create_context(initiator)))
+	if (!(endp->iscsi = iscsi_create_context(endp->initiator)))
 	{
 		warn_errno("iscsi_create_context()");
 		return 0;
@@ -1489,10 +1502,10 @@ int stat_endpoint(struct endpoint_st *endp, char const *which)
 }
 
 int init_endpoint(struct endpoint_st *endp, char const *which,
-	char const *initiator, char const *url)
+	char const *url)
 {
 	/* Create $endp->iscsi and connect to $endp->url. */
-	if (!(endp->iscsi = iscsi_create_context(initiator)))
+	if (!(endp->iscsi = iscsi_create_context(endp->initiator)))
 	{
 		warn_errno("iscsi_create_context()");
 		return 0;
@@ -1514,7 +1527,7 @@ int init_endpoint(struct endpoint_st *endp, char const *which,
 }
 
 #ifdef SEXYCAT
-int local_to_remote(char const *initiator, struct input_st *input)
+int local_to_remote(struct input_st *input)
 {
 	off_t maxwrite;
 	int eof, overflow;
@@ -1612,7 +1625,7 @@ int local_to_remote(char const *initiator, struct input_st *input)
 			free_surplus_unused_chunks(input);
 		} else
 		{
-			if (!reconnect_endpoint(dst, initiator))
+			if (!reconnect_endpoint(dst))
 				return 0;
 			reduce_maxreqs(dst, "destination");
 			free_surplus_unused_chunks(input);
@@ -1632,8 +1645,7 @@ int local_to_remote(char const *initiator, struct input_st *input)
 		return 1;
 }
 
-int remote_to_local(char const *initiator, struct input_st *input,
-	unsigned output_flags)
+int remote_to_local(struct input_st *input, unsigned output_flags)
 {
 	struct pollfd pfd[2];
 	struct endpoint_st *src = input->src;
@@ -1694,7 +1706,7 @@ int remote_to_local(char const *initiator, struct input_st *input,
 				return 0;
 		} else
 		{
-			if (!reconnect_endpoint(src, initiator))
+			if (!reconnect_endpoint(src))
 				return 0;
 			reduce_maxreqs(src, "source");
 			free_surplus_unused_chunks(input);
@@ -1718,7 +1730,7 @@ int remote_to_local(char const *initiator, struct input_st *input,
 	return 1;
 }
 
-int remote_to_remote(char const *initiator, struct input_st *input)
+int remote_to_remote(struct input_st *input)
 {
 	struct pollfd pfd[2];
 	struct endpoint_st *src = input->src;
@@ -1753,7 +1765,7 @@ int remote_to_remote(char const *initiator, struct input_st *input)
 				return 0;
 		} else
 		{
-			if (!reconnect_endpoint(src, initiator))
+			if (!reconnect_endpoint(src))
 				return 0;
 			reduce_maxreqs(src, "source");
 			free_surplus_unused_chunks(input);
@@ -1767,7 +1779,7 @@ int remote_to_remote(char const *initiator, struct input_st *input)
 			free_surplus_unused_chunks(input);
 		} else
 		{
-			if (!reconnect_endpoint(dst, initiator))
+			if (!reconnect_endpoint(dst))
 				return 0;
 			reduce_maxreqs(dst, "destination");
 			free_surplus_unused_chunks(input);
@@ -1794,7 +1806,6 @@ int main(int argc, char *argv[])
 	} src, dst;
 	int isok, optchar, nop;
 	unsigned output_flags;
-	char const *initiator;
 	struct input_st input;
 	struct output_st output;
 	char const *optstring;
@@ -1819,9 +1830,8 @@ int main(int argc, char *argv[])
 	output_flags = O_EXCL;
 
 	/* These defaults are used in --debug mode. */
-	initiator = "jaccom";
-	src.url = "iscsi://127.0.0.1/iqn.2014-07.net.nsn-net.timmy:omu/0";
-	dst.url = "iscsi://127.0.0.1/iqn.2014-07.net.nsn-net.timmy:omu/1";
+	src.url = "iscsi://127.0.0.1/iqn.2014-07.net.nsn-net.timmy:try/0";
+	dst.url = "iscsi://127.0.0.1/iqn.2014-07.net.nsn-net.timmy:try/1";
 	if (argv[1] && !strcmp(argv[1], "--debug"))
 	{
 		argc--;
@@ -1834,15 +1844,11 @@ int main(int argc, char *argv[])
 #else
 # define SEXYWRAP_CMDLINE			/* none */
 #endif
-	optstring = "hvqi:Ns:S:p:m:d:D:P:OM:b:B:r:R:" SEXYWRAP_CMDLINE ;
+	optstring = "hvqi:s:S:p:m:I:d:D:P:OM:b:B:r:R:N" SEXYWRAP_CMDLINE ;
 
 	while ((optchar = getopt(argc, argv, optstring)) != EOF)
 		switch (optchar)
 		{
-		case 'h':
-			usage();
-			exit(0);
-
 		case 'v':
 			Opt_verbosity++;
 			break;
@@ -1850,14 +1856,10 @@ int main(int argc, char *argv[])
 			Opt_verbosity--;
 			break;
 
-		case 'i':
-			initiator = optarg;
-			break;
-		case 'N':
-			nop = 1;
-			break;
-
 		/* Source-related options */
+		case 'i':
+			src.endp.initiator = optarg;
+			break;
 		case 's':
 			src.is_local = 0;
 			src.url = optarg;
@@ -1874,6 +1876,9 @@ int main(int argc, char *argv[])
 			break;
 
 		/* Destination-related options */
+		case 'I':
+			dst.endp.initiator = optarg;
+			break;
 		case 'd':
 			dst.is_local = 0;
 			dst.url = optarg;
@@ -1912,6 +1917,10 @@ int main(int argc, char *argv[])
 			Opt_max_output_queue = atoi(optarg);
 			break;
 
+		/* Mode of operation. */
+		case 'N':
+			nop = 1;
+			break;
 #ifdef SEXYWRAP
 		case 'x':
 		{	/* Execute a program preloaded with us. */
@@ -1951,8 +1960,14 @@ int main(int argc, char *argv[])
 				setenv("LD_PRELOAD", path, 1);
 
 			/* Set the $initiator for sexywrap. */
-			if (initiator)
-				setenv("SEXYWRAP_INITIATOR", initiator, 1);
+			if (src.endp.initiator && !src.endp.initiator[0])
+				die("invalid source initiator name");
+			if (dst.endp.initiator)
+				die("destination initiator name "
+					"cannot be specified");
+			if (src.endp.initiator)
+				setenv("SEXYWRAP_INITIATOR",
+					src.endp.initiator, 1);
 
 			/* Execute the program. */
 			argv += optind - 1;
@@ -1962,6 +1977,9 @@ int main(int argc, char *argv[])
 		} /* -x */
 #endif /* SEXYWRAP */
 
+		case 'h':
+			usage();
+			exit(0);
 		default:
 			exit(1);
 		}
@@ -1981,6 +1999,14 @@ int main(int argc, char *argv[])
 		dst.is_local = 1;
 	if (src.is_local && dst.is_local)
 		die("at least one iSCSI target must be specified");
+
+	/* Verify that both $src's and $dst's initiators are usable. */
+	if (!src.endp.initiator || !src.endp.initiator[0])
+		src.endp.initiator = "jaccom";
+	if (!dst.endp.initiator)
+		dst.endp.initiator = src.endp.initiator;
+	else if (!dst.endp.initiator[0])
+		dst.endp.initiator = "jaccom";
 
 	/* Both local_to_remote() and remote_to_local() interpret
 	 * NULL file names as stdin/stdout. */
@@ -2004,7 +2030,7 @@ int main(int argc, char *argv[])
 	if (src.is_local)
 		/* LOCAL_TO_REMOTE() */
 		src.endp.fname = src.fname;
-	else if (!init_endpoint(&src.endp, "source", initiator, src.url))
+	else if (!init_endpoint(&src.endp, "source", src.url))
 		die(NULL);
 	if (dst.is_local)
 	{	/* REMOTE_TO_LOCAL() */
@@ -2024,8 +2050,7 @@ int main(int argc, char *argv[])
 		output.max = Opt_max_output_queue;
 		output.iov = xmalloc(sizeof(*output.iov) * output.max);
 		output.tasks = xmalloc(sizeof(*output.tasks) * output.max);
-	} else if (!init_endpoint(&dst.endp, "destination",
-			initiator, dst.url))
+	} else if (!init_endpoint(&dst.endp, "destination", dst.url))
 		die(NULL);
 	if (!src.is_local && !dst.is_local)
 	{	/* REMOTE_TO_REMOTE().   Unfortunately we can't accept
@@ -2049,11 +2074,11 @@ int main(int argc, char *argv[])
 	if (nop)
 		isok = 1;
 	else if (LOCAL_TO_REMOTE(&input))
-		isok = local_to_remote(initiator, &input);
+		isok = local_to_remote(&input);
 	else if (REMOTE_TO_LOCAL(&input))
-		isok = remote_to_local(initiator, &input, output_flags);
+		isok = remote_to_local(&input, output_flags);
 	else
-		isok = remote_to_remote(initiator, &input);
+		isok = remote_to_remote(&input);
 
 	/* Done */
 	if (isok)
