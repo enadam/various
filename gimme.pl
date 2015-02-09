@@ -378,8 +378,10 @@ sub send_dir
 	{
 		my (@row, $link, $full);
 
-		stat($_);
 		$link = readlink($_);
+		stat($_)
+			or defined $link && lstat($_)
+			or next;
 
 		s!^.*/+!!;
 		$full = $location->new($_);
