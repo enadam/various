@@ -7,3 +7,4 @@ ibusz.patch		make ibusz.pl work even better
 libartem.c		LD_PRELOAD-able embedded syslog
 getkey.c		lists or tests which evdev keys are being pressed
 mafwturbator.pl		funny C identifier generator
+modinject.pl		bundle Perl modules with scripts in a single file
