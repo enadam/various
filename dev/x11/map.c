@@ -300,10 +300,11 @@
  *                      See the examples.  (Specific to hildon-desktop.)
  * -o name=<something>  Make the <window>'s WM_NAME <something>.
  * -o !name             Unset the WM_NAME of <window>.
- * -o bg=<img>          Make <img> the background of <window>.  For details
- *                      of <img> see the -G img=... command.  The difference
- *                      is that when set as background, the image needn't be
- *                      redrawn after the window has been unexposed.
+ * -o bg={<color>|<img>} Set the <window>'s background to <color> or <img>.
+ *                      For details of <img> see the -G img=... command.
+ *                      The difference is that when set as background,
+ *                      the image needn't be redrawn after the window
+ *                      has been unexposed.
  * -o !bg               Unset the background pixmap of <window>.
  * -o [!]OR             Make the <window>s override redirected or clear
  *                      this attribute.
@@ -5366,7 +5367,7 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                 {
                   Bool set;
                   char *dup;
-                  char const *img;
+                  char const *bg;
 
                   dup = opt;
                   if (*opt == '!')
@@ -5392,10 +5393,21 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                       assert(!set);
                       XSetWindowBackgroundPixmap(Dpy, win, None);
                     }
-                  else if ((img = isprefix(opt, "bg=")) != NULL)
+                  else if ((bg = isprefix(opt, "bg=")) != NULL)
                     {
                       assert(set);
-                      plot_image(img, win, True);
+                      if (strspn(bg, "@%#"))
+                        {
+                          XWindowAttributes current;
+
+                          get_win_attrs(win, &current, False, NULL);
+                          if (*get_color_pixel(current.colormap, bg,
+                                          &attrs.background_pixel) != '\0')
+                            die("Junk after color specification");
+                          attrmask |= CWBackPixel;
+                        }
+                      else
+                        plot_image(bg, win, True);
                     }
                   else if (!strcmp(opt, "OR"))
                     {
@@ -6277,7 +6289,7 @@ int main(int argc, char const *const *argv)
               "%3$*2$s -A rotate=<axis>,<degrees>[,<x>,<y>,<z>]\n"
               "%3$*2$s -A scale=<scale-x>[,<scale-y>]\n"
               "%3$*2$s -o name=NAME -o !name\n"
-              "%3$*2$s -o bg=<img> -o !bg\n"
+              "%3$*2$s -o bg={<color|<img>} -o !bg\n"
               "%3$*2$s -o {[!]{OR|focusable|starticonic|iconic|normal|withdrawn|fs}},...\n"
               "%3$*2$s -mu -R [<sibling>|hi|lo|bottom] -L [<sibling>|lo|bottom] -dDK\n"
               "%3$*2$s -k [[<duration>]:][{ctrl|alt|fn}-]...{<keysym>|<string>}\n"
