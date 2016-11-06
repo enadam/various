@@ -308,6 +308,7 @@
  * -o !bg               Unset the background pixmap of <window>.
  * -o [!]OR             Make the <window>s override redirected or clear
  *                      this attribute.
+ * -o [!]decorated      Make the window (un)decorated.
  * -o [!]focusable      Accept (default) or reject keyboard focus.
  * -o [!]starticonic    Make the <window>s initially iconic when mapped.
  * -o [!]{normal|iconic|withdrawn}
@@ -5414,6 +5415,43 @@ static Window command_block(int argc, char const *const *argv, unsigned ncmds,
                       attrs.override_redirect = set;
                       attrmask |= CWOverrideRedirect;
                     }
+                  else if (!strcmp(opt, "decorated"))
+                    {
+                      static const unsigned undecorated = 0x2;
+                      char *vals;
+                      Atom wm_hints;
+                      unsigned nvals, width;
+
+                      wm_hints = XInternAtom(Dpy, "_MOTIF_WM_HINTS", False);
+                      if ((vals = get_properties(win, wm_hints, wm_hints,
+                                                 &nvals, &width)))
+                        {
+                          long *hints;
+
+                          assert(nvals > 0);
+                          hints = (long *)vals;
+                          if (!(hints[0] & undecorated) != !!set)
+                            { /* Change _MOTIF_WM_HINTS[0]. */
+                              if (set)
+                                hints[0] &= ~undecorated;
+                              else
+                                hints[0] |= undecorated;
+                              set_properties(win, wm_hints, wm_hints,
+                                             vals, nvals, PropModeReplace);
+                            }
+                          XFree(vals);
+                        }
+                      else if (!set)
+                        { /* Set _MOTIF_WM_HINTS. */
+                          long hints[5];
+
+                          memset(hints, 0, sizeof(hints));
+                          hints[0] = undecorated;
+                          set_properties(win, wm_hints, wm_hints,
+                                         hints, MEMBS_OF(hints),
+                                         PropModeReplace);
+                        }
+                    }
                   else if (!strcmp(opt, "focusable"))
                     {
                       wmhints.input = set;
@@ -6290,7 +6328,7 @@ int main(int argc, char const *const *argv)
               "%3$*2$s -A scale=<scale-x>[,<scale-y>]\n"
               "%3$*2$s -o name=NAME -o !name\n"
               "%3$*2$s -o bg={<color|<img>} -o !bg\n"
-              "%3$*2$s -o {[!]{OR|focusable|starticonic|iconic|normal|withdrawn|fs}},...\n"
+              "%3$*2$s -o {[!]{OR|decorated|focusable|starticonic|iconic|normal|withdrawn|fs}},...\n"
               "%3$*2$s -mu -R [<sibling>|hi|lo|bottom] -L [<sibling>|lo|bottom] -dDK\n"
               "%3$*2$s -k [[<duration>]:][{ctrl|alt|fn}-]...{<keysym>|<string>}\n"
               "%3$*2$s -c <x>x<y>[!]\n"
