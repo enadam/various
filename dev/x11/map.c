@@ -1673,6 +1673,7 @@ static char *get_net_wm_name(Window win)
  * Returns whether it managed to find the client window.  Based on
  * XmuClientWindow() code.
  */
+static char *get_property(Atom win, Atom key, Atom type);
 static Bool find_client_window(Window *win, char const *name,
                                char const *wintype)
 {
@@ -1714,6 +1715,31 @@ static Bool find_client_window(Window *win, char const *name,
       /* Reject stupid 1x1 windows. */
       ours = XGetWindowAttributes(Dpy, *win, &attrs)
         && (attrs.width > 1 && attrs.height > 1);
+
+      if (ours)
+        { /* According to ICCCM the window manager sets the WM_STATE property
+           * of client windows, but we must also check that it's not in
+           * WithdrawnState. */
+          char *iswm;
+          Atom wm_state;
+
+          wm_state = XInternAtom(Dpy, "WM_STATE", False);
+          if ((iswm = get_property(*win, wm_state, wm_state)) != NULL)
+            {
+              struct wm_state_st
+                {
+                  unsigned state;
+                  Window icon;
+                } const *state;
+
+              state = (struct wm_state_st const *)iswm;
+              ours = state->state != WithdrawnState;
+              XFree(iswm);
+            }
+          else /* ! $iswm */
+            ours = False;
+        }
+
       if (ours && wintype)
         { /* Match $wintype. */
           static Atom wm_type = None;
@@ -1855,7 +1881,6 @@ out:
 } /* pick_window */
 
 /* Returns the current active window's XID. */
-static char *get_property(Atom win, Atom key, Atom type);
 static Window find_topmost(void)
 {
   static char const *props[] =
