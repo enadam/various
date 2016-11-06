@@ -2,7 +2,7 @@
   : Our only requirement is x11.  Let us see which optional packages
   : are available.
   pkgs="x11";
-  optional="xfixes xext xcomposite xtst xi xres xft xrender";
+  optional="xfixes xext xextproto xcomposite xtst xi xres xft xrender";
 
   : We can live without pkg-config if we must, but we will be very limited.
   if pkg-config --version > /dev/null 2>&1;
@@ -22,6 +22,13 @@
       : because we would not use it.
       [ "$pkg" = "xi" -a "$with_xtst" = "no" ] \
         && continue;
+
+      : Check for xexproto only if we have xfixes but not xext.
+      if [ "$pkg" = "xextproto" ];
+      then
+        [ "$with_xfixes" = "yes" -a "$with_xext" != "yes" ] \
+          || continue;
+      fi
 
       define="$pkg";
       eval with=\$with_$define;
@@ -682,6 +689,9 @@
 
 #ifdef HAVE_XFIXES
 # include <X11/extensions/Xfixes.h>
+#endif
+#ifdef HAVE_XEXTPROTO
+# include <X11/extensions/shapeconst.h>
 #endif
 #ifdef HAVE_XEXT
 # include <X11/extensions/shape.h>
