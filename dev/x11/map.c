@@ -1238,36 +1238,50 @@ static unsigned get_int_list(long *list, unsigned max, char const *str)
 {
   unsigned i;
 
+  i = 0;
   memset(list, 0, sizeof(*list) * max);
-  if (!str)
+  if (!str || !*str)
     return 0;
 
-  i = 0;
   for (;;)
     {
+      char const *endp;
+
       if (i >= max)
         die("Too many arguments");
-      else if (!*str)
-        break;
 
-      if (*str == ',')
+      *list = strtol(str, (char **)&endp, 0);
+      if (endp > str && (*endp == ',' || *endp == '\0'))
         {
-          list++;
-          str++;
           i++;
+          list++;
+          if (!*endp)
+            break;
+          str = endp + 1;
         }
-      else if (!(isdigit(*str) || *str == '-' || *str == '+' || isspace(*str)))
+      else
         {
           char *name;
 
-          assert((str = dup_optarg(str, &name)) != NULL);
-          if (strcmp(name, "none"))
-            /* Not "none". */
-            *list++ = get_atom(name);
+          name = NULL;
+          str = dup_optarg(str, &name);
+          *list++ = get_atom(name ? name : "");
           free(name);
+          i++;
+
+          if (!str)
+            /* Parsed the final empty string. */
+            break;
+          if (str[-1] == ',')
+            /* There are more arguments. */
+            continue;
+          if (*str)
+            /* '""' is not followed by ','. */
+            die("Syntax error");
+          else
+            /* Parsed the final string. */
+            break;
         }
-      else
-        *list = strtol(str, (char **)&str, 0);
     } /* for */
 
   return i;
