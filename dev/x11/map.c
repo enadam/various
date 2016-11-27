@@ -733,6 +733,11 @@
 # include "sgxdefs.h"
 #endif
 
+/* From libgdk-pixbuf2.0 GdkPixbuf:s are GObjects. */
+#ifdef __G_OBJECT_H__
+# define gdk_pixbuf_unref       g_object_unref
+#endif
+
 /* XImage characteristics */
 #define X11_BITS_PER_CHANNEL    8
 #define X11_BYTES_PER_PIXEL     4
