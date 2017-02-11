@@ -442,6 +442,26 @@ sub urldecode
 	return $str;
 }
 
+# Serve $path if we can.
+sub serve
+{
+	my ($c, $r, $path) = @_;
+
+	check_path($c, $path)
+		or return;
+	if (-f _)
+	{
+		$c->send_file_response($path->as_string());
+	} elsif (-d _)
+	{
+		send_dir($c, $r, $path);
+	} else
+	{	# Special file, can't send it.
+		print " (special file)";
+		$c->send_error(RC_BAD_REQUEST);
+	}
+}
+
 # Accept connections and serve requests.
 sub main
 {
@@ -478,22 +498,12 @@ sub main
 				sub { read_chunk(*GIMME) }));
 			seek(GIMME, 0, 0);
 		} else
-		{
-			$c->send_error(RC_BAD_REQUEST);
+		{	# Ignore $qeury.
+			serve($c, $r, $path);
 		}
-	} elsif (check_path($c, $path))
-	{	# Serve $path if we can.
-		if (-f _)
-		{
-			$c->send_file_response($path->as_string());
-		} elsif (-d _)
-		{
-			send_dir($c, $r, $path);
-		} else
-		{	# Special file, can't send it.
-			print " (special file)";
-			$c->send_error(RC_BAD_REQUEST);
-		}
+	} else
+	{
+		serve($c, $r, $path);
 	}
 	print "\n";
 
