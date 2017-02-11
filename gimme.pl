@@ -139,8 +139,8 @@ sub absolutely_clear
 }
 # End of module Path >>>
 
-# Override Daemon::ClientConn notify the client we'll close the
-# connection after the response.
+# Override Daemon::ClientConn to notify the client we'll close the connection
+# after the response.
 package GoodByeClient;
 
 our @ISA = qw(HTTP::Daemon::ClientConn);
@@ -149,7 +149,7 @@ use strict;
 sub send_basic_header
 {
 	my $self = shift;
-	$self->SUPER::send_basic_header();
+	$self->SUPER::send_basic_header(@_);
 	print $self "Connection: close\r\n";
 }
 
