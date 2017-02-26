@@ -41,7 +41,8 @@
 #    sorted by last modification time.  There will be "Gimme!" links
 #    for directories that let clients download them in a single .tar
 #    archive.  This capability was the prime motivation to write Gimme.
-#    When creating a tarball symlinks are not followed.
+#    When creating a tarball symlinks are not followed.  These and
+#    other navigation links are not presented to robots.
 # -- .dotfiles are not shown in directory listings, but they remain
 #    accessible by addressing them directly, so they are still public.
 # -- 00INDEX is a series of <file-name> <description> mappings, each
@@ -338,7 +339,7 @@ sub send_dir
 	$isrobi = defined ($ua = $request->header('User-Agent'))
 		&& $ua =~ $ROBOTS;
 
-	# Upper navigational bar
+	# Upper navigation bar
 	$location = Path->new('/');
 	if (!$isrobi)
 	{
@@ -411,10 +412,12 @@ sub send_dir
 		{	# Regular file, show its size.
 			push(@row, right((stat(_))[7] . 'B'));
 		} elsif (-d _)
-		{	# Directory, give a download link.
-			push(@row, right(mklink(
-				'Gimme!', 'Download as tarball',
-				"$full/$_.tar.gz", 'gimme')));
+		{	# Directory, give a download link unless the client
+			# $isrobi.
+			push(@row, $isrobi
+				? right(escape('<DIR>'))
+				: right(mklink('Gimme!', 'Download as tarball',
+					"$full/$_.tar.gz", 'gimme')));
 		} else
 		{	# Something else, just leave it empty.
 			push(@row, cell(''));
