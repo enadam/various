@@ -49,6 +49,8 @@
 #    line describing a file in the directory.  These descriptions are
 #    shown in directory listings.
 # -- <dir>/.motd is displayed in every directory listing.
+# -- .headers: specify or override HTTP headers (e.g. Content-Type)
+#    when sending files from that directory.
 # >>>
 
 # Program code
@@ -75,7 +77,10 @@ sub new
 	my ($class, $path) = @_;
 	my ($is_absolute, @path);
 
-	if (defined $path && $path ne '')
+	if (ref $path)
+	{
+		return bless([ @$path ],  ref $class || $class);
+	} elsif (defined $path && $path ne '')
 	{
 		$is_absolute = $path =~ s{^/+}{};
 		@path = grep($_ ne '.', split(qr{/+}, $path));
@@ -154,19 +159,114 @@ sub absolutely_clear
 }
 # End of module Path >>>
 
-# Override Daemon::ClientConn to notify the client we'll close the connection
-# after the response.
-package GoodByeClient;
+# Override HTTP::Daemon::ClientConn.
+package GoodByeClient; # <<<
+
+use strict;
+use Errno qw(EACCES);
+use HTTP::Status;
+use HTTP::Date qw(time2str);
+use LWP::MediaTypes qw(guess_media_type);
 
 our @ISA = qw(HTTP::Daemon::ClientConn);
-use strict;
 
+# Notify the client we'll close the connection after the response.
 sub send_basic_header
 {
 	my $self = shift;
 	$self->SUPER::send_basic_header(@_);
 	print $self "Connection: close\r\n";
 }
+
+# Send custom .headers along with the file response.
+sub send_file_response
+{
+	my ($self, $fname) = @_;
+	my $headers;
+	local *FH;
+
+	$headers = Path->new($fname)->pop()->add(".headers");
+	$headers = $headers->as_string();
+	$fname = $fname->as_string();
+
+	if (!open(FH, '<', $fname))
+	{
+		return $self->send_error(RC_FORBIDDEN)
+			if $! == EACCES;
+		warn "$fname: $!";
+		return $self->send_error(RC_INTERNAL_SERVER_ERROR);
+	}
+	binmode(FH);
+
+	if (!$self->antique_client())
+	{
+		my ($fsize, $mtime);
+		my (@headers, $content_type, $encoding);
+		local *HEADERS;
+
+		# Get $fname's $fsize and $mtime.
+		(undef, undef, undef, undef, undef, undef, undef,
+			$fsize, undef, $mtime) = stat(FH);
+		defined $fsize && defined $mtime
+			or warn "$fname: $!";
+
+		# HEADERS => @headers
+		if (open(HEADERS, '<', $headers))
+		{
+			while (<HEADERS>)
+			{
+				chomp;
+				if (/^Content-Type:/i)
+				{
+					$content_type = 1;
+				} elsif (/^Content-Encoding:/i)
+				{
+					$encoding = 1;
+				}
+				push(@headers, $_);
+			}
+			close(HEADERS);
+		}
+
+		# Guess Content-Type and/or Content-Encoing if not included
+		# in @headers.
+		if (!$content_type && !$encoding)
+		{
+			($content_type, $encoding) = guess_media_type($fname);
+		} elsif (!$content_type)
+		{
+			$content_type = guess_media_type($fname);
+			$encoding = undef;
+		} elsif (!$encoding)
+		{
+			(undef, $encoding) = guess_media_type($fname);
+			$content_type = undef;
+		} else
+		{
+			$content_type = $encoding = undef;
+		}
+
+		# Send all the headers.
+		$self->send_basic_header();
+		print $self "Content-Type: $content_type\r\n"
+			if defined $content_type;
+		print $self "Content-Encoding: $encoding\r\n"
+			if defined $encoding;
+		print $self "Content-Length: $fsize\r\n"
+			if defined $fsize;
+		print $self "Last-Modified: ", time2str($mtime), "\r\n"
+			if defined $mtime;
+		print $self $_, "\r\n"
+			foreach @headers;
+
+		print $self "\r\n";
+	}
+
+	$self->send_file(\*FH)
+		unless $self->head_request();
+	return RC_OK;
+}
+# >>>
 
 package main;
 use strict;
@@ -473,7 +573,7 @@ sub serve
 		or return;
 	if (-f _)
 	{
-		$c->send_file_response($path->as_string());
+		$c->send_file_response($path);
 	} elsif (-d _)
 	{
 		send_dir($c, $r, $path);
