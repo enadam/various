@@ -259,7 +259,7 @@ sub check_path
 sub send_tar
 {
 	my ($client, $path) = @_;
-	my ($dir, $link);
+	my $dir;
 
 	# We placed the file name suggestion in the last component.
 	$path->pop();
@@ -270,10 +270,8 @@ sub send_tar
 	$dir =~ s/\\/\\\\/g;
 	$dir =~ s/!/\\!/g;
 
-	# This truely horrendous construct enables us to deal with
-	# symlink $path:s without --dereference.
-	$link = readlink($path);
-	open(TAR, '-|', qw(tar cz), '-C', defined $link ? $link : $path,
+	# Make tar(1) transform the path prefixes to $dir.
+	open(TAR, '-|', qw(tar cz), '-C', $path,
 		'--transform', "s!^\\.\$!$dir!;s!^\\./!$dir/!", '.')
 		or return $client->send_error(RC_SERVICE_UNAVAILABLE);
 	$client->send_response(HTTP::Response->new(
