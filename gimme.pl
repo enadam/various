@@ -1,6 +1,6 @@
 #!/usr/bin/perl -w
 #
-# gimme.pl -- tiny HTTP server for sharing personal stuff
+# gimme.pl -- tiny HTTP server for sharing personal stuff <<<
 #
 # Just start it up and let friends browse and download your public goodies.
 # The exported directories will be browseable and downloadable as tarballs.
@@ -9,32 +9,46 @@
 # ./gimme.pl [-C] [<address> | <dir>]
 # ./gimme.pl [-C]  <address>   <dir>
 #
+# <address> is the one to listen on, defaulting to localhost.  Use "all"
+# to make the service available on all interfaces.  By default the port
+# is 80 if started as root, otherwise it's 8080.
+#
 # <dir> designates the wwwroot of the service.  Clients will be able to get
-# everything there, but nothing outside.  You can hide stuff from the index
-# by placing them in a dotfile or dotdir.  They will remain browseable and
-# downloadable with a direct link, though.  You can put a .motd file in the
-# wwwroot to display it in all directory listings.
+# everything underneath, but nothing outside.  Symlink targets are treated
+# as if they were within wwwroot.  For example if a symlink points to /tmp
+# clients will have access to it and its children, but not its parent (/).
+# Non-regular files (sockets, FIFO:s and device nodes) are not served.
+# If not specified otherwise <dir> will be the current working directory.
 #
-# <address> is the interface address to listen on (localhost by default,
-# use 'all' to listen on all interfaces), and <dir> is the root of the
-# directory to be served (the current working directory by default).
-# If started as root gimme tries to listen on port 80 (otherwise on
-# port 8080) and then it drops all root privileges.
-#
-# If the -C flag is present gimme chroot()s to <dir>.  This will disable
-# directory downloading unless you make tar available in the chroot.
+# If the -C flag is present Gimme chroot()s to <dir>.  This will disable
+# directory downloading unless you make tar(1) available in the chroot.
 # Generally speaking, the chrooted mode may be quite fragile because
 # it is hard to predict what kind of modules will LWP and the others
 # require in run-time.  We're doing our best, though.
 #
-# gimme re-executes iteself when it receives a SIGHUP, pleasing its
-# developer and the uptime whores.
+# Having privileged stuff done Gimme changes its UIDs and GIDs to those
+# owning the executable.  SIGHUP makes Gimme re-execute itself, pleasing
+# its developer and uptime whores.  Access log is written to the standard
+# output.
 #
-# gimme.pl was written with public (but not wild) exposure in mind,
-# so it is thought to be relatively secure in the sense that it won't
-# give away stuff you didn't intend to share.  However, it can be DoS:ed
-# and generally, is not efficient with large files.
+# Gimme was written with public (but not wild) exposure in mind, so it is
+# thought to be relatively secure in the sense that it won't give away stuff
+# you didn't intend to share.  However, it can be DoS:ed and generally,
+# is not efficient with large files.
 #
+# Special files:
+# -- If the requested path is a directory its contents are listed,
+#    sorted by last modification time.  There will be "Gimme!" links
+#    for directories that let clients download them in a single .tar
+#    archive.  This capability was the prime motivation to write Gimme.
+#    When creating a tarball symlinks are not followed.
+# -- .dotfiles are not shown in directory listings, but they remain
+#    accessible by addressing them directly, so they are still public.
+# -- 00INDEX is a series of <file-name> <description> mappings, each
+#    line describing a file in the directory.  These descriptions are
+#    shown in directory listings.
+# -- <dir>/.motd is displayed in every directory listing.
+# >>>
 
 # Program code
 # Encapsulates a Unix path and tries to provide a sensible way to access
