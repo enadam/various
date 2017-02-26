@@ -261,8 +261,15 @@ sub send_tar
 	my ($client, $path) = @_;
 	my $dir;
 
-	# We placed the file name suggestion in the last component.
+	# The last component is expected to be the suggested file name.
 	$path->pop();
+	check_path($client, $path)
+		or return;
+	if (! -d _)
+	{
+		$client->send_error(RC_NOT_FOUND);
+		return;
+	}
 
 	# What to transform the initial '.' of the paths in the archive to.
 	# This should be the directory name we made the archive of or $SITE.
