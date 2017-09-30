@@ -3,17 +3,38 @@
 # svnclean -- delete all files not under version control of Subversion
 #
 # Synopsis:
-#   svnclean [-C]
+#   svnclean [-L] [-C]
 #
 # Specify -C to commit the operation.  Otherwise svnclean will just print
-# the files it would delete.
+# the files it would delete.  Unless -L is specified, symbolic links are
+# left alone.
 #
 
-if [ "x$1" = "x-C" ];
+getfiles() {
+	svn status --no-ignore | sed -ne 's/^[?I] \+//p' \
+	| while read fname;
+	do
+		[ $1 = "no" -a -L "$fname" ] \
+			|| echo "$fname";
+	done
+}
+
+if [ "x$1" = "x-L" ];
 then
-	svn status --no-ignore | sed -ne 's/^[?I] \+//p' | xargs -- rm -rf;
+	opt_symlinks="yes";
+	shift;
 else
-	svn status --no-ignore | sed -ne 's/^[?I] \+//p';
+	opt_symlinks="no";
+fi
+
+if [ "x$1" = "x" ];
+then
+	getfiles $opt_symlinks;
+elif [ "x$1" = "x-C" ];
+then
+	getfiles $opt_symlinks | xargs -- rm -rf;
+else
+	echo "svnclean: $1: unknown option" >&2;
 fi
 
 # End of svnclean
