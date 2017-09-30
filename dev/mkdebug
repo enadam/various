@@ -1,0 +1,366 @@
+#!/bin/bash -e
+#
+# mkdebug -- create detached debug files from shared libraries
+#            and executables in a source code repository
+#
+# This program walks through a directory hierarchy, extracts debugging
+# information from shared ELF libraries and executables and collects
+# them in an output directory.  These debug information enable source-
+# level debugging with gdb.
+#
+# The operation of this script is roughly the same as what dh_strip
+# does for Debian packages, except that it has wider scope and doesn't
+# interfere with packaging.
+#
+# The output of mkdebug is a directory containing the debug files,
+# their installation script and possibly the tools necessary for
+# the installation script.
+#
+# Synopsis:
+#   mkdebug [-sgcC] [-o <output-dir>] [<input-dir>]...
+#
+# Options:
+#   -s		Strip debug information from binaries after it has been
+#		extracted into a separate file.
+#   -g		Adds a .gnu_debuglink ELF section to the binaries from
+#		which debug information have been extracted.
+#   -c		Indicates that the .gnu_debuglink sections should be
+#		added to the binaries on the target machine during the
+#		installation of the debug files.  This is the default,
+#		but it can be used together with -g.
+#   -C		Like -c, except that in addition tools for the binary
+#		editing will be included in <output-dir> along with the
+#		installation script.  This is the default if neither of
+#		-gc is specified.
+#   -o <output-dir>
+#		Specifies the directory where the debug files will be
+#		collected.  By default it's the current working directory.
+#
+# <output-dir> can be bundled, trasferred to an IPDU and extracted there.
+# After that the included `install' script must be run, otherwise gdb won't
+# find the debug information.
+#
+# If <input-dir> is omitted, the current working directory's subtree is
+# processed.
+#
+# Example usage:
+#   environment $ mkdebug -o jaccom
+#   environment $ tar czf jaccom.tgz jaccom
+#   < transfer jaccom.tgz to the target IPDU >
+#   ipdu /tmp $ tar xzf jaccom.tgz
+#   ipdu /tmp $ ./jaccom/install
+#   Added debug link to /opt/util/liblnx-util.x86_64.so
+#   Added debug link to /opt/util/liblnx-util-testmsg.x86_64.so
+#   Added debug link to /opt/pubvar/liblnx-pubvar.x86_64.so
+#   Added debug link to /opt/log/liblnx-log.x86_64.so
+#   Added debug link to /opt/launcher/liblnx-launcher.x86_64.so
+#   Added debug link to /opt/hwapi/liblnx-hwapi.x86_64.so
+#   [...]
+#   Cleaning up
+#   ipdu /tmp $ gdb kutyafasza
+
+# Parse the command line.
+strip="no";
+outdir=".";
+add_debug_link_now="";
+add_debug_link_later="";
+include_objcopy="no";
+while getopts "sgcCo:" optchar;
+do
+	case "$optchar" in
+	s)
+		strip="yes";;
+	g)
+		add_debug_link_now="yes";;
+	c)
+		add_debug_link_later="yes";;
+	C)
+		add_debug_link_later="yes";
+		include_objcopy="yes";;
+	o)
+		outdir="$OPTARG";
+		mkdir -p "$outdir";;
+	*)
+		exit 1;;
+	esac
+done
+
+# If none of -g or -c is specified, suppose -cC.
+if [ "$add_debug_link_now" = "" -a "$add_debug_link_later" = "" ];
+then
+	add_debug_link_now="no";
+	add_debug_link_later="yes";
+	include_objcopy="yes";
+elif [ "$add_debug_link_now" = "" ];
+then
+	add_debug_link_now="no";
+elif [ "$add_debug_link_later" = "" ];
+then
+	add_debug_link_later="no";
+fi
+
+# The rest of the arguments are the input directories.
+shift $[ OPTIND - 1 ];
+[ $# -gt 0 ] \
+	|| set -- .
+
+# We're interested in these kind of files.
+filter='\| ELF .* (executable|shared object), x86-64, .*, not stripped$';
+
+# Files with these extensions are not supposed to be of interest.
+# By skipping them we reduce the number of files for file(1) to inspect.
+ignore="mk|mak|am";
+ignore="$ignore|[Cchod]|[ch]pp|cxx|java";
+ignore="$ignore|sh|pl|py|m4";
+ignore="$ignore|txt|html|xml|docbook";
+ignore="$ignore|doc|docx|xls|ppt|vsd";
+ignore="$ignore|png|pdf";
+ignore="$ignore|conf|cfg|ini";
+ignore="$ignore|crl|crt|crtx";
+ignore="$ignore|hit|db|data|gz";
+
+# Find the interesting files and process them.  Since we use '|' as separator
+# we're ok with files containing spaces (but not newlines).
+ifs="$IFS";
+IFS="|";
+find "$@" \( -name .svn -o -name .git \) -prune \
+		-o -type f \
+		   -regextype posix-egrep \
+		 ! -regex ".*(/[Mm]akefile|\.($ignore))(\.in)?$" \
+		   -print0 \
+	| xargs -0 file -N -F '|' \
+	| grep -E "$filter" \
+| while read input desc;
+do
+	# Skip the files we created ourselves.
+	output=`basename "$input"`;
+	output="$outdir/$output";
+	[ ! "$input" -ef "$output" ] \
+		|| continue;
+	output="$output.dbg";
+
+	# Create the debug file.
+	objcopy --only-keep-debug "$input" "$output";
+	chmod -x "$output";
+
+	# Pre- (post-?) process the $input file.
+	if [ "$add_debug_link_now" = "yes" ];
+	then	# Strip $input and add the debug link at once if requested.
+		args="--add-gnu-debuglink=$output";
+		[ "$strip" = "yes" ] \
+			&& args="$args --strip-debug";
+		objcopy "$input" $args "$input.new";
+		mv -f "$input.new" "$input";
+	elif [ "$strip" = "yes" ];
+	then
+		strip -d "$elf";
+	fi
+done
+IFS="$ifs";
+
+# Copy objcopy, readelf and libbfd to $outdir/tools if requested.
+if [ "$include_objcopy" = "yes" ];
+then
+	tools="$outdir/tools";
+	[ -d "$tools" ] \
+		|| mkdir "$tools";
+
+	cp `which objcopy readelf` "$tools";
+	bfd=$(ldd $(which objcopy) \
+		| awk '{ if ($1 ~ /^libbfd/) { print $3; exit; } }');
+	[ "$bfd" = "" ] \
+		|| (umask ugo-x; cp "$bfd" "$tools");
+fi
+
+# Finally construct the installation script.
+cat > "$outdir/install" << 'EOT'
+#!/bin/sh -e
+#
+# install -- install debug files for shared ELF libraries and executables
+#
+# This program installs those debug files necessary for source-level
+# debugging which were separated from binaries in build time with
+# objcopy --only-keep-debug.
+#
+# Synopsis:
+#   install [-nk]
+#
+# Options:
+#   -n		Don't attempt to add .gnu_debuglink sections to the
+#		binaries to which the debug file belong.  This section
+#		is necessary for gdb to locate the separate debug file.
+#		Without it gdb won't even bother to find it, so this
+#		option is only useful if the binaries on your system
+#		have already been prepared with this section.
+#  -k		Causes the script not to delete itself after it has
+#		done its deeds.
+#
+# The debug files have to be in the same directory as `install'.
+# If a binary on the system has a .gnu_debuglink section already,
+# it will be left alone.  However, if the section needs to be added,
+# the objcopy program must be either installed or bundled with the
+# script.
+
+# Parse the command line.
+me=`dirname "$0"`;
+EOT
+
+cat >> "$outdir/install" << EOT
+add_debug_links="$add_debug_link_later";
+EOT
+
+cat >> "$outdir/install" << 'EOT'
+cleanup="yes";
+while getopts "nk" optchar;
+do
+	case "$optchar" in
+	n)
+		add_debug_links="no";;
+	k)
+		cleanup="no";;
+	*)
+		exit 1;;
+	esac
+done
+
+# If we're to add debug link sections, find objcopy and optionally readelf.
+if [ "$add_debug_links" = "yes" ];
+then
+	if which objcopy > /dev/null 2>&1;
+	then	# objcopy is in the $PATH.
+		objcopy="objcopy";
+	elif [ -x "$me/tools/objcopy" ];
+	then	# Use our copy.
+		objcopy="$me/tools/objcopy";
+		export LD_LIBRARY_PATH="$me/tools";
+	else	# Not found and not supplied.
+		echo "Cannot add debug links: objcopy is missing" >&2;
+		exit 1;
+	fi
+
+	# readelf is used to check whether an ELF has a debug link section
+	# already.  It's not fatal if we don't have it, because objcopy
+	# will complain in this case, which we can catch and recognize.
+	if which readelf > /dev/null 2>&1;
+	then
+		readelf="readelf";
+	elif [ -x "$me/tools/readelf" ];
+	then
+		readelf="$me/tools/readelf";
+	else
+		readelf="";
+	fi
+fi
+
+# Add a .gnu_debuglink ELF section to $elf, which points to $dbg.
+# This will make gdb search for debug information in $dbg for $elf.
+add_debug_link() {
+	local elf="$1";
+	local dbg="$2";
+
+	# First check whether the section is present in $elf already.
+	pattern='^ *\[[0-9]\+\] \+\.gnu_debuglink \+PROGBITS \+';
+	[ "$readelf" != "" ] \
+		&& "$readelf" -S "$elf" | grep -q "$pattern" \
+		&& return;
+
+	# Get the realpath of $elf if it's a symbolic link, because we'll
+	# overwrite it.
+	[ ! -L "$elf" ] \
+		|| elf=`realpath "$elf"`;
+
+	# Do the operation and see what objcopy says.
+	"$objcopy" "$elf" --add-gnu-debuglink="$dbg" "$elf.new" 2>&1 \
+	| (
+		if ! read error;
+		then	# objcopy remained silent.  Overwrite the original
+			# $elf with the new one.
+			echo "Added debug link to $elf";
+			mv -f "$elf.new" "$elf";
+		elif [ "$readelf" != "" ];
+		then	# objcopy should be silent if it was successful,
+			# so there must be an error.  Print all of it,
+			# then exit.  (Our parent process will exit too
+			# because of set -e).
+			cat >&2;
+			exit 1;
+		elif [ "$error" = "objcopy:$elf.new: cannot create debug link section \`$dbg': Invalid operation" ];
+		then	# $elf has a debug link section already.
+			# Since we don't have any means to verify
+			# it's correct, suppose it is.
+			exit 0;
+		else	# objcopy has some other error.  Err out.
+			echo "$error" >&1;
+			cat >&2;
+			exit 1;
+		fi
+	)
+}
+
+# Main starts here.
+# First query the installed shared libraries with ldconfig
+# and try to find matching debug files in our directory.
+ldconfig -p | awk '{ print $NF }' \
+| while read lib;
+do
+	fname=`basename "$lib"`;
+	dir=`dirname "$lib"`;
+	debug="$me/$fname.dbg";
+	if [ -f "$debug" ];
+	then	# We have a debug file for $lib.
+		# Move $debug to $lib's directory.
+		add_debug_link "$lib" "$debug";
+		mv -f "$debug" "$dir";
+	fi
+done
+
+# For those debug files we haven't found a shared library,
+# try to locate a library or an executable by alternative means.
+for fname in $me/*.dbg;
+do
+	# busybox' shell can't do nullglobbing, so we need
+	# to check whether $fname exists at all.
+	[ -f "$fname" ] \
+		|| continue;
+
+	# Remove the extensions from $fname and figure out
+	# what we're $search:ing for.
+	ext=".x86_64.dbg";
+	[ "${fname%$ext}" != "$fname" ] \
+		|| ext=".dbg";
+	search=`basename "$fname" "$ext"`;
+
+	# Try to find $search.  If it's an executable it could be right in
+	# the $PATH.  Otherwise search the file system for a matching name.
+	# In very unfortunate cases find(1) could return multiple results,
+	# but we have no means knowhing which one we're looking for, so just
+	# let's take the first one in this case.
+	bin=`which "$search" 2> /dev/null || true`;
+	[ "$bin" != "" ] \
+		|| bin=`find / -xdev -path /usr/lib/debug -prune -o \( -type f -name "$search" -print \) 2> /dev/null | head -1`;
+	if [ "$bin" = "" ];
+	then
+		echo "Couldn't find binary for" `basename "$fname"` >&2;
+		continue;
+	fi
+	dir=`dirname "$bin"`;
+
+	# Found a match for $fname.
+	add_debug_link "$bin" "$fname";
+	mv -f "$fname" "$dir";
+done
+
+# Delete our traces if requested.
+if [ "$cleanup" = "yes" ];
+then
+	echo "Cleaning up";
+	rm -r "$me";
+fi
+
+# End of install
+EOT
+
+# Done!
+chmod +x "$outdir/install";
+
+# End of mkdebug
