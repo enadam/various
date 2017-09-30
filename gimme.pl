@@ -49,6 +49,8 @@
 #    line describing a file in the directory.  These descriptions are
 #    shown in directory listings.
 # -- <dir>/.motd is displayed in every directory listing.
+# -- If .htaccess is present in a directory Authorization: is demanded
+#    from the client (but _not_ verified).
 # -- .headers: specify or override HTTP headers (e.g. Content-Type)
 #    when sending files from that directory.
 # >>>
@@ -567,7 +569,27 @@ sub urldecode
 # Serve $path if we can.
 sub serve
 {
-	my ($c, $r, $path) = @_;
+	my ($c, $r, $path, $noauth) = @_;
+
+	unless ($noauth)
+	{
+		my $authorization = $r->header("Authorization");
+		if (!defined $authorization)
+		{
+			my $dir = Path->new($path)->pop();
+			if (-f $dir->add(".htaccess")->as_string())
+			{
+				$c->send_basic_header(RC_UNAUTHORIZED);
+				print $c "WWW-Authenticate: Basic realm=",
+					'"', $dir->as_string(), '"', "\r\n";
+				print $c "\r\n";
+				return;
+			}
+		} else
+		{
+			print " (Authorization: $authorization)"
+		}
+	}
 
 	check_path($c, $path)
 		or return;
