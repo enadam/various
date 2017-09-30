@@ -30,8 +30,8 @@
  * every second.)
  *
  * <common-options> are:
- *		[-6] [-I=<interface>] [--sctp]
- *   		[--sender[=<duration>][/<intersleep>]|--receiver]
+ *		[-6] [-I=<interface>] [--sctp] [--port=<port-number>]
+ *		[--sender[=<duration>][/<intersleep>]|--receiver]
  *		[--pause] [-n <nprocs>]
  *
  *   -6			Communicate through IPv6 rather than through IPv4.
@@ -40,6 +40,9 @@
  *			be set to the index of <interface>.  Otherwise this
  *			option is ignored.
  *   --sctp		Communicate through SCTP rather than TCP.
+ *   --port=<port-num>	Specify the TCP/SCTP port to listen on (server mode)
+ *			or to connect to (in client mode).  The default is
+ *			DFLT_SRVPORT.
  *   --sender[=<duration>][/<intersleep>]
  *			Be the sender of the messages (default for clients)
  *			for <duration> seconds (a minute by default), and
@@ -100,7 +103,7 @@
 #include <arpa/inet.h>
 
 /* On which port to listen/connect to. */
-#define SRVPORT					1234
+#define DFLT_SRVPORT				1234
 #define MYCHAIN					"lbsdia"
 
 /* Stringify @str. */
@@ -333,10 +336,10 @@ int main(int argc, char const *argv[])
 	int sfd, *sfds, pfd;
 	volatile int be_quiet, do_pause, stats;
 	volatile int is_boss, is_ipv6, is_client, is_sender;
-	unsigned i, timeout, devidx;
+	unsigned i, timeout, devidx, port;
 	volatile unsigned proto, nprocs;
 	struct timespec intersleep, start, finish;
-	char const *device;
+	char const *device, *portstr;
 	char const *iptables, *protostr, *destination;
 	char const *direction, *dsaddr, *dsport, *sport;
 	struct rlimit coresize;
@@ -352,8 +355,9 @@ int main(int argc, char const *argv[])
 	/* Need help? */
 	if (argv[1] && (!strcmp(argv[1], "--help") || !strcmp(argv[1], "-h")))
 	{
-		printf("usage: %s [-6] [-I=<interface>] [--sctp] "
-		        "[--sender[=<duration>][/<intersleep>]|--receiver] "
+		printf("usage: %s "
+			"[-6] [-I=<interface>] [--sctp] [--port=<srv-port>] "
+			"[--sender[=<duration>][/<intersleep>]|--receiver] "
 			"[--pause] [-n <nprocs>] [<destination> [--quiet] "
 			"[{--overall-stats|--wide-stats|--no-stats"
 			"|--no-iptables}]]\n",
@@ -387,6 +391,18 @@ int main(int argc, char const *argv[])
 	{
 		proto    = IPPROTO_TCP;
 		protostr = "tcp";
+	}
+
+	/* Get @port. */
+	if (argv[1] && !strncmp(argv[1], "--port=", 7))
+	{
+		portstr	= &argv[1][7];
+		port	= atoi(portstr);
+		argv++;
+	} else
+	{
+		port	= DFLT_SRVPORT;
+		portstr	= Q(DFLT_SRVPORT);
 	}
 
 	/* Decide whether @is_sender.  If not specified explicitly,
@@ -538,7 +554,7 @@ int main(int argc, char const *argv[])
 		saddr.ip4.sin_family = AF_INET;
 		if (destination)
 			assert(inet_aton(destination, &saddr.ip4.sin_addr));
-		saddr.ip4.sin_port = htons(SRVPORT);
+		saddr.ip4.sin_port = htons(port);
 	} else
 	{	/* IPv6 */
 		memset(&saddr.ip6, 0, sizeof(saddr.ip6));
@@ -546,7 +562,7 @@ int main(int argc, char const *argv[])
 		if (destination)
 			assert(inet_pton(AF_INET6, destination,
 				&saddr.ip6.sin6_addr) == 1);
-		saddr.ip6.sin6_port = htons(SRVPORT);
+		saddr.ip6.sin6_port = htons(port);
 		saddr.ip6.sin6_scope_id = devidx;
 	}
 
@@ -617,13 +633,13 @@ int main(int argc, char const *argv[])
 		if (stats >= 0)
 			command(be_quiet,
 				iptables, "-D", direction, "-p", protostr,
-				dsaddr, destination, dsport, Q(SRVPORT),
+				dsaddr, destination, dsport, portstr,
 				"-j", "DROP", NULL, 1, 0);
 		/* iptables -D ...; this and the following are mut. ex. */
 		if (stats >= 0 && command(be_quiet,
-			    iptables, "-D", direction,
-			    "-p", protostr, dsaddr, destination,
-			    dsport, Q(SRVPORT), NULL, 1, 0))
+				iptables, "-D", direction,
+				"-p", protostr, dsaddr, destination,
+				dsport, portstr, NULL, 1, 0))
 			/* iptables -D ... -j MYCHAIN */
 			command(be_quiet,
 				iptables, "-D", direction, "-j", MYCHAIN,
@@ -688,7 +704,7 @@ int main(int argc, char const *argv[])
 				command(be_quiet,
 					iptables, "-I", direction,
 					"-p", protostr, dsaddr, destination,
-					dsport, Q(SRVPORT),
+					dsport, portstr,
 					NULL, 0);
 			} else if (stats >= 2)
 			{	/* Add connection-specific statistics rule
@@ -714,7 +730,7 @@ int main(int argc, char const *argv[])
 				command(be_quiet,
 					iptables, "-A", MYCHAIN,
 					"-p", protostr, dsaddr, destination,
-					sport, cltport, dsport, Q(SRVPORT),
+					sport, cltport, dsport, portstr,
 					"-j", "RETURN",
 					NULL, 0);
 
@@ -916,7 +932,7 @@ int main(int argc, char const *argv[])
 		/* @is_client: cut the connection. */
 		command(be_quiet,
 			iptables, "-I", direction, "-p", protostr,
-			dsaddr, destination, dsport, Q(SRVPORT),
+			dsaddr, destination, dsport, portstr,
 			"-j", "DROP", NULL, 0);
 
 	if (is_client || nprocs == 1 || !is_boss)
@@ -994,12 +1010,12 @@ int main(int argc, char const *argv[])
 			command(be_quiet,
 				iptables, "-D", direction,
 				"-p", protostr, dsaddr, destination,
-				dsport, Q(SRVPORT),
+				dsport, portstr,
 				NULL, 0);
 
 		/* Remove our DROP rule. */
 		command(be_quiet, iptables, "-D", direction, "-p", protostr,
-			dsaddr, destination, dsport, Q(SRVPORT),
+			dsaddr, destination, dsport, portstr,
 			"-j", "DROP",
 			NULL, 0);
 	} /* statistics and iptables clean up */
