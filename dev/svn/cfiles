@@ -2,5 +2,6 @@
 #
 # cfiles -- show C and C++ source files in a directory hierarchy
 #
+# If optional arguments are present, return files in those directories.
 
-exec svnfiles '*.[cCh]' '*.cpp' '*.cxx' '*.cc' '*.hpp';
+exec svnfiles "$@" -- '*.[cCh]' '*.cpp' '*.cxx' '*.cc' '*.hpp';
