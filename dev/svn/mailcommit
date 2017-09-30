@@ -10,6 +10,8 @@
 # with subversion hooks, but unfortunately those require administrative
 # access to the repository.
 #
+# Edit $email below to control whom to send the diffs.
+#
 # Synopsis:
 #   mailcommit [-nN] [<files-to-commit>]...
 #
@@ -35,8 +37,8 @@
 #   -- store $email:s in svn properties
 
 # Whom to send mails.
-email="kukas.feri@example.com";
-email="$email lofasz.joska@example.com";
+email="john@example.com";
+email="$email jane@example.com";
 
 # Choose a $mailer we know.
 if [ "x$1" = "x-n" ];
