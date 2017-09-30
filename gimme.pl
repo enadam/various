@@ -543,7 +543,7 @@ sub send_dir
 		sort({ $$a[0] <=> $$b[0] } @list)));
 
 	# A little advertisement
-	$ad = para("Brought to you by ",
+	$ad = para("Brought to you by",
 		mklink("Gimme!", 'Get the source', "/$GIMME", "gimmegimme"))
 		if !$isrobi;
 
