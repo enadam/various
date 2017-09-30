@@ -1,0 +1,41 @@
+#!/bin/sh
+#
+# svn-server -- start a Subversion server
+#
+# Synopsis:
+#   svn-server [-w] [<repository>|<repositories>]
+#
+# If <repository> is repository, serve just that one.  Otherwise the subdirs
+# of <repositories> will be served.  If none specified the current working
+# directory is searched.  Unless enabled with -w, the repositories will be
+# read-only.  Note that the server is bound to the localhost only.
+
+if [ $# -gt 0 -a "x$1" = "x-w" ];
+then
+	read_only="";
+	shift;
+else
+	read_only="-R";
+fi
+
+if [ $# -gt 0 ];
+then
+	repos="$1";
+else
+	repos=".";
+fi
+
+for conf in "$repos/conf/svnserve.conf" "$repos/svnserve.conf";
+do
+	if [ -f "$conf" ];
+	then	# Start svnserve with $conf.
+		exec svnserve -d --foreground --listen-host localhost \
+			-r "$repos" $read_only --config-file "$conf";
+		exit 1;
+	fi
+done
+
+# No configuration.
+exec svnserve -d --foreground --listen-host localhost -r "$repos" $read_only;
+
+# End of svn-server

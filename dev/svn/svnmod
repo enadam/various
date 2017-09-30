@@ -1,0 +1,8 @@
+#!/bin/sh
+#
+# svnmod -- show the new or modified files in a Subversion repository
+#
+
+svn status | sed -ne 's/^[AMD!]\(M\)\? \+//p';
+
+# End of svnmod

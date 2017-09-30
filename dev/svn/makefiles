@@ -1,0 +1,6 @@
+#!/bin/sh
+#
+# makefiles -- show all possible Makefiles in a directory hierarchy
+#
+
+exec svnfiles Makefile makefile '*.mk';
