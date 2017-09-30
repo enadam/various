@@ -1,16 +1,16 @@
 /*
- * sicktp.c -- SCTP swiss-army knife
+ * sicktp.c -- SCTP and TCP swiss-army knife
  *
- * This program is meant to play with the SCTP protocol.  It embeds
- * both a client and a server, supports IPv4 and IPv6, multihoming
- * and SCTP notifications.
+ * This program is meant to play with the SCTP protocol, but it can use
+ * TCP too.  It embeds both a client and a server, supports IPv4 and IPv6,
+ * multihoming and SCTP notifications.
  *
  * Compilation: ``cc -Wall -lsctp sicktp.c -o sicktp''.
  *
  * Synopsis:
- *   sicktp [-46] [-p1|-p2] \
- *          {-s <port> <bind-addr> | -[dp] <port> <connect-addr>}...
- *          [-xX <program> [<arguments>]...]
+ *   sicktp [-46] [-p1|-p2|-T] [-P <seconds>] [-S] \
+ *          {-s[r] <port> <bind-addr> | d[p] <port> <connect-addr>}...
+ *          [-[xX] <program> [<arguments>]...]
  *
  * If left unspecified, IPv4 is assumed as network protocol.  This case
  * <bind-addr> and <connect-addr> must be IPv4 addresses.  If -6 is given,
@@ -18,16 +18,21 @@
  * optional "%<interface>" suffix is available, which tells `sicktp' the
  * scope id of the address (which is mandatory for link-local addresses).
  *
- * -p1 and -p2 selects the desired SCTP parameters; if none is specified,
- * no special SCTP setup is performed.
+ * -T selects TCP mode.  If not specified, -p1 and -p2 selects the desired
+ * SCTP parameters; if none is specified, no special SCTP setup is performed.
  *
- * You can list any number of addresses to bind to or to connect to.
- * If neither -[dp] is specified, server role is assumed and the program
- * listens on <bind-addr>:<bind-port>.  For clients it's possible to specify
- * both <bind-addr> and <connect-addr>.  If you don't want to choose the
- * client side <port> you can leave it 0.
+ * With -P you can ask for reports about the number of sent or received
+ * bytes during the specified past <seconds>.
  *
- * The difference between -d and -p is that in the latter case the following
+ * Unless using TCP, you can list any number of addresses to bind to or to
+ * connect to.  If -d[p] is not specified, server role is assumed and the
+ * program listens on <bind-addr>:<bind-port>.  This case -S makes sicktp
+ * print SCTP statistics after a client has disconnected.  For clients it's
+ * possible to specify both <bind-addr> and <connect-addr>.  -sr lets you
+ * share the <bind-addr> with multiple clients.  If you don't want to choose
+ * the client side <port> you can leave it 0.
+ *
+ * The difference between -d and -dp is that in the latter case the following
  * IP address will be set primary with the SCTP_PRIMARY_ADDR socket option
  * when the connection comes up.
  *
@@ -37,8 +42,8 @@
  * the standard input is redirected as well.
  *
  * There are probably many programs out there with similar functionality
- * as sicktp.  One key difference could be that this program was expressly
- * written for SCTP.
+ * as sicktp.  One key difference could be that this program has strong
+ * emphasis on SCTP.
  */
 
 /* Include files */
@@ -49,12 +54,15 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <time.h>
 #include <signal.h>
 
 #include <arpa/inet.h>
+#include <netinet/ip.h>
 #include <netinet/sctp.h>
 #include <net/if.h>
 
+#include <sys/time.h>
 #include <sys/select.h>
 #include <sys/ioctl.h>
 
@@ -68,6 +76,10 @@
 #define DFLT_SRTO_MIN			 500
 #define DFLT_SRTO_MAX			1000
 
+#define SCTP_GET_ASSOC_STATS		 150
+#define SCTP_STATS_READZERO		 0x1
+#define SCTP_PUSH_STATS_EVENT		(SCTP_AUTHENTICATION_INDICATION + 7)
+
 /* Type definitions */
 /* Tightly packed pack of sockaddr_in:s and sockaddr_in6:es as buiilt
  * by add_addr() for the likings of sctp_bindx() and sctp_connectx(). */
@@ -77,6 +89,54 @@ struct addresses_st
 	size_t size;
 	char saddr[];
 };
+
+#ifdef SCTP_GET_ASSOC_STATS
+/* SCTP association statistics. */
+struct sctp_assoc_stats
+{
+	uint32_t rcv_packets;		/* received SCTP packets	*/
+	uint32_t rcv_ctrl_packets;	/* received control chunks	*/
+	uint32_t rcv_bytes;		/* received bytes (IP payload)	*/
+	uint32_t dup_tsn;		/* duplicate transmission
+					 * sequence numbers		*/
+	uint32_t snd_packets;		/* sent SCTP packets		*/
+	uint32_t snd_ctrl_packets;	/* sent control chunks		*/
+	uint32_t snd_bytes;		/* sent bytes (IP payload)	*/
+	uint32_t retrans;		/* retransmissions		*/
+};
+
+/* Interface for user to fetch SCTP association statistics. */
+struct sctp_getassocstats
+{
+	sctp_assoc_t sstats_assoc_id;
+	struct sctp_assoc_stats stats;
+	uint8_t action;
+} __attribute__((packed, aligned(4)));
+
+/* Payload of SCTP_PUSH_STATS_EVENT. */
+struct sctp_push_stats_event
+{
+	uint16_t spse_type;
+	uint16_t spse_flags;
+	uint32_t spse_length;
+	sctp_assoc_t spse_assoc_id;
+	struct sctp_assoc_stats spse_stats;
+};
+
+/* Subscription interface for SCTP_PUSH_STATS_EVENT. */
+struct sctp_event_subscribe_nsn
+{
+    struct sctp_event_subscribe orig;
+
+	// As newer and newer fields are added to the official structure,
+	// this reserve gets smaller and smaller.  The intention is that
+	// our new field be in a predictable position--at the end of the
+	// struct.  This makes the size of the structure exactly 16 bytes.
+	uint8_t reserved[16 - sizeof(struct sctp_event_subscribe) - 1];
+
+	uint8_t sctp_push_stats_event;
+};
+#endif /* SCTP_GET_ASSOC_STATS */
 
 /* Program code */
 /* Utilities */
@@ -95,10 +155,10 @@ static void __attribute__((noreturn)) error(char const *str1,
 
 static void __attribute__((noreturn)) usage(void)
 {
-	error("usage", "sicktp [-4 | -6] [-p1 | -p2] "
-	      "{{-s <bind-port> <bind-addr>[%<interface>]} | "
-	      "{-[dp] <connect-port> <connect-addr>[%<interface>]...}}... "
-	      "[-x <program> [<arguments>]...]");
+	error("usage", "sicktp [-4|-6] [-p1|-p2|-T] [-P <seconds>] [-S] "
+	      "{{-s[r] <bind-port> <bind-addr>[%<interface>]} |"
+	      " {-d[p] <connect-port> <connect-addr>[%<interface>]...}}..."
+	      " [-[xX] <program> [<arguments>]...]");
 } /* usage */
 
 static void ensure_arg(void const *ptr)
@@ -236,7 +296,7 @@ static void setup_sctp_default(int sfd)
 	paddr.spp_hbinterval = DFLT_SPP_HBINTERVAL;
 	paddr.spp_flags      = SPP_HB_ENABLE;
 	if (setsockopt(sfd, SOL_SCTP, SCTP_PEER_ADDR_PARAMS,
-		       &paddr, sizeof(paddr)) < 0) 
+		       &paddr, sizeof(paddr)) < 0)
 		error_errno("setsockopt(SCTP_PEER_ADDR_PARAMS)");
 
 	memset(&rto, 0, sizeof(rto));
@@ -264,7 +324,7 @@ static void setup_sctp_special(int sfd)
 	paddr.spp_flags      = SPP_HB_ENABLE | SPP_SACKDELAY_ENABLE;
 	if (setsockopt(sfd, SOL_SCTP, SCTP_PEER_ADDR_PARAMS, &paddr,
 		       sizeof(paddr)) < 0)
-	       	error_errno("setsockopt(SCTP_PEER_ADDR_PARAMS)");
+		error_errno("setsockopt(SCTP_PEER_ADDR_PARAMS)");
 
 	/* Applying RTO parameters. */
 	memset(&rto, 0, sizeof(rto));
@@ -272,27 +332,57 @@ static void setup_sctp_special(int sfd)
 	rto.srto_min     = 150;
 	rto.srto_max     = 200;
 	if (setsockopt(sfd, SOL_SCTP, SCTP_RTOINFO, &rto, sizeof(rto)) < 0)
-	       	error_errno("setsockopt(SCTP_RTOINFO)");
+		error_errno("setsockopt(SCTP_RTOINFO)");
 
 	/* Applying association max retransmission parameter. */
 	memset(&assoc, 0, sizeof(assoc));
 	assoc.sasoc_asocmaxrxt = 4;
 	if (setsockopt(sfd, SOL_SCTP, SCTP_ASSOCINFO,
 		       &assoc, sizeof(assoc)) < 0)
-	       	error_errno("setsockopt(SCTP_ASSOCINFO)");
+		error_errno("setsockopt(SCTP_ASSOCINFO)");
 
 	/* Applying bundling parameter. */
 	nodelay = 1;
 	if (setsockopt(sfd, SOL_SCTP, SCTP_NODELAY,
 		       &nodelay, sizeof(nodelay)) < 0)
-	       	error_errno("setsockopt(SCTP_NODELAY)");
+		error_errno("setsockopt(SCTP_NODELAY)");
 } /* setup_sctp_special */
+
+/* Dump the contents of an sctp_assoc_stats. */
+static void print_sctp_statistics(struct sctp_assoc_stats const *stats)
+{
+	printf(	"rcv(pkt: %u, ctrl: %u, oct: %u, dup: %u), "
+		"snd(pkt: %u, ctrl: %u, oct: %u, retrans: %u)\n",
+		stats->rcv_packets, stats->rcv_ctrl_packets,
+			stats->rcv_bytes, stats->dup_tsn,
+		stats->snd_packets, stats->snd_ctrl_packets,
+			stats->snd_bytes, stats->retrans);
+} /* print_sctp_statistics */
+
+/* Read and the statistical counters of an SCTP association. */
+static void read_sctp_statistics(int sfd)
+{
+#ifdef SCTP_GET_ASSOC_STATS
+	struct sctp_getassocstats stats;
+	socklen_t sstats = sizeof(stats);
+
+	memset(&stats, 0, sizeof(stats));
+	stats.action = SCTP_STATS_READZERO;
+	if (getsockopt(sfd, SOL_SCTP, SCTP_GET_ASSOC_STATS,
+			&stats, &sstats) < 0)
+		fprintf(stderr, "SCTP_GET_ASSOC_STATS: %m\n");
+	else
+		print_sctp_statistics(&stats.stats);
+#else /* ! SCTP_GET_ASSOC_STATS */
+	fputs("SCTP_GET_ASSOC_STATS: not implemented\n", stderr);
+#endif
+} /* read_sctp_statistics */
 
 /* Suck $sfd and print it if an SCTP notification arrived.  Otherwise,
  * silently throw it away.  If $primary is not NULL, it'll be set as
  * SCTP_PRIMARY_ADDR when SCTP_COMM_UP. */
-static void read_sctp_notification(int sfd,
-				   struct sockaddr_storage const *primary)
+static int read_sctp_notification(int sfd,
+				  struct sockaddr_storage const *primary)
 {
 	int flags;
 	char buf[1024];
@@ -303,18 +393,45 @@ static void read_sctp_notification(int sfd,
 	flags = MSG_DONTWAIT;
 	if (sctp_recvmsg(sfd, buf, sizeof(buf), NULL, 0,
 			 &sinfo, &flags) <= 0)
-		return;
-	if (!(flags & MSG_NOTIFICATION))
-		return;
+		return 0;
+	else if (!(flags & MSG_NOTIFICATION))
+		return 1;
 
 	/* Print SCTP_ASSOC_CHANGE and SCTP_PEER_ADDR_CHANGE. */
 	notif = (const union sctp_notification *)&buf[0];
-	fprintf(stderr, "notification %u\n", notif->sn_header.sn_type);
 	switch (notif->sn_header.sn_type)
 	{
+		const char *event;
+
 	case SCTP_ASSOC_CHANGE:
-		printf("SCTP_ASSOC_CHANGE: %u\n",
-		       notif->sn_assoc_change.sac_state);
+		switch (notif->sn_assoc_change.sac_state)
+		{
+		case SCTP_COMM_UP:
+			event = "COMM UP";
+			break;
+		case SCTP_COMM_LOST:
+			event = "COMM LOST";
+			break;
+		case SCTP_RESTART:
+			event = "PEER RESTARTED";
+			break;
+		case SCTP_SHUTDOWN_COMP:
+			event = "SHUTDOWN COMPLETE";
+			break;
+		case SCTP_CANT_STR_ASSOC:
+			event = "ASSOC SETUP FAILED";
+			break;
+		default:
+			event = NULL;
+			break;
+		}
+
+		if (event)
+			fprintf(stderr, "SCTP_ASSOC_CHANGE: %s\n", event);
+		else
+			fprintf(stderr, "SCTP_ASSOC_CHANGE: %u\n",
+				notif->sn_assoc_change.sac_state);
+
 		if (notif->sn_assoc_change.sac_state == SCTP_COMM_UP
 		    && primary)
 		{
@@ -324,7 +441,7 @@ static void read_sctp_notification(int sfd,
 			setprim.ssp_addr = *primary;
 			if (setsockopt(sfd, SOL_SCTP, SCTP_PRIMARY_ADDR,
 				       &setprim, sizeof(setprim)) < 0)
-			       	error_errno("setsockopt(SCTP_PRIMARY_ADDR)");
+				error_errno("setsockopt(SCTP_PRIMARY_ADDR)");
 		}
 		break;
 	case SCTP_PEER_ADDR_CHANGE: {
@@ -337,12 +454,53 @@ static void read_sctp_notification(int sfd,
 		sprintf(&str[0] + strlen(str), ":%u",
 		       	ntohs(saddr4->sin_port));
 
-		printf("SCTP_PEER_ADDR_CHANGE: %u (%s)\n",
-		       notif->sn_paddr_change.spc_state, str);
+		switch (notif->sn_paddr_change.spc_state)
+		{
+		case SCTP_ADDR_ADDED:
+			event = "ADDR ADDED";
+			break;
+		case SCTP_ADDR_REMOVED:
+			event = "ADDR REMOVED";
+			break;
+		case SCTP_ADDR_AVAILABLE:
+			event = "ADDR AVAILABLE";
+			break;
+		case SCTP_ADDR_CONFIRMED:
+			event = "ADDR CONFIRMED";
+			break;
+		case SCTP_ADDR_UNREACHABLE:
+			event = "ADDR UNREACHABLE";
+			break;
+		case SCTP_ADDR_MADE_PRIM:
+			event = "ADDR IS PRIMARY";
+		default:
+			event = NULL;
+			break;
+		}
+
+		if (event)
+			fprintf(stderr, "SCTP_PEER_ADDR_CHANGE: %s\n", event);
+		else
+			fprintf(stderr, "SCTP_PEER_ADDR_CHANGE: %u\n",
+				notif->sn_paddr_change.spc_state);
 		break;
 	} /* case */
+	case SCTP_SHUTDOWN_EVENT:
+		fputs("SCTP_SHUTDOWN_EVENT\n", stderr);
+		return 0;
+	case SCTP_PUSH_STATS_EVENT: {
+		const struct sctp_push_stats_event *spse = (void *)&buf[0];
+		fprintf(stderr, "SCTP_PUSH_STATS_EVENT: ");
+		print_sctp_statistics(&spse->spse_stats);
+		break;
+	} /* case */
+	default:
+		fprintf(stderr, "notification 0x%x\n",
+			notif->sn_header.sn_type);
 	} /* switch */
-} /* sctp_notification */
+
+	return 1;
+} /* read_sctp_notification */
 
 /* Make $fd the stdout and optionally stdin, and exec($prog).
  * Leave stderr as it is. */
@@ -361,20 +519,45 @@ static void launch(int fd, int redir_stdin, char const *const *prog)
 		error(prog[0], strerror(errno));
 } /* launch */
 
+/* Report that $NTransferred bytes has been sent/recvd since the last time.
+ * $NTotal is the cumulated $NTransferred during a connection. */
+static unsigned Report_progress;
+static unsigned long NTransferred, NTotal;
+static void report_progress(int unused)
+{
+	time_t now;
+	struct timeval tv;
+	char timestamp[64];
+
+	gettimeofday(&tv, NULL);
+	now = tv.tv_sec;
+	strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S",
+		localtime(&now));
+
+	NTotal += NTransferred;
+	fprintf(stderr, "[%s.%.6lu] %lu (%lu)\n",
+		timestamp, tv.tv_usec, NTransferred, NTotal);
+	NTransferred = 0;
+
+	alarm(Report_progress);
+} /* report_progress */
+
 /* The main function */
 int main(int argc, char const *argv[])
 {
 	int sfd;
-	char what;
-	int capital_ex;
+	char const *what;
 	char const *const *prog;
-	unsigned i, ip_version, port;
+	int capital_ex, print_stats;
 	struct addresses_st *src, *dst;
 	struct sockaddr_storage primary;
+	unsigned i, ip_version, proto, port;
 
 	/* Parse the command line. */
 	ip_version = 4;
 	src = dst = NULL;
+	proto = IPPROTO_SCTP;
+	print_stats = 0;
 
 	/* -[46]? */
 	i = 1;
@@ -389,9 +572,30 @@ int main(int argc, char const *argv[])
 		i++;
 	}
 
+	/* Use TCP? */
+	if (argv[i] && !strcmp(argv[i], "-T"))
+	{
+		proto = 0;
+		i++;
+	}
+
+	/* Report the number of send/received messages? */
+	if (argv[i] && !strcmp(argv[i], "-P"))
+	{
+		ensure_arg(argv[++i]);
+		Report_progress = parse_int(argv[i++]);
+	}
+
+	/* Print SCTP statistics in server mode when a client disconnects? */
+	if (argv[i] && !strcmp(argv[i], "-S"))
+	{
+		print_stats = 1;
+		i++;
+	}
+
 	/* Create and set up $sfd. */
 	if ((sfd = socket(ip_version == 4 ? PF_INET : PF_INET6, SOCK_STREAM,
-			  IPPROTO_SCTP)) < 0)
+			  proto)) < 0)
 		error_errno("socket");
 
 	/* -p1, -p2 */
@@ -405,10 +609,11 @@ int main(int argc, char const *argv[])
 		i++;
 	}
 
-	/* -[sdp] */
+	/* -s, -d[p], -[xX] */
 	port = 0;
-	what = '\0';
+	what = NULL;
 	prog = NULL;
+	capital_ex = 0;
 	primary.ss_family = AF_UNSPEC;
 	ensure_arg(argv[i]);
 	do
@@ -417,21 +622,31 @@ int main(int argc, char const *argv[])
 		struct sockaddr_storage saddr;
 
 		make_primary = 0;
-		if (!strcmp(argv[i], "-s"))
+		if (!strcmp(argv[i], "-s") || !strcmp(argv[i], "-sr"))
 		{
-			i++;
-			what = 's';
+			what = argv[i++];
+			ensure_arg(argv[i]);
 			port = parse_int(argv[i++]);
-		} else if (!strcmp(argv[i], "-d") || !strcmp(argv[i], "-p"))
+			if (what[2] == 'r')
+			{
+				int reuseaddr = 1;
+				if (setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR,
+						&reuseaddr,
+						sizeof(reuseaddr)) < 0)
+					error_errno(
+						"setsockopt(SO_REUSEADDR)");
+			}
+		} else if (!strcmp(argv[i], "-d") || !strcmp(argv[i], "-dp"))
 		{
-			what = 'd';
-			make_primary = argv[i++][1] == 'p';
+			what = argv[i++];
+			make_primary = what[2] == 'p';
+			ensure_arg(argv[i]);
 			port = parse_int(argv[i++]);
 		} else if (!strcmp(argv[i], "-x") || !strcmp(argv[i], "-X"))
 		{
-			capital_ex = argv[i][1] == 'X';
-			if (!(prog = &argv[++i]))
-				usage();
+			capital_ex = argv[i++][1] == 'X';
+			ensure_arg(argv[i]);
+			prog = &argv[i++];
 			break;
 		} else if (!what)
 			usage();
@@ -440,45 +655,90 @@ int main(int argc, char const *argv[])
 		parse_addr(sfd, &saddr, ip_version, argv[i++], port);
 		if (make_primary)
 			primary = saddr;
-		if (what == 's')
+		if (what[1] == 's')
+		{
+			if (!proto && src)
+				error(what,
+				      "TCP connections may have a single "
+				      "source IP address");
 			src = add_addr(src, &saddr);
-		else
+		} else
+		{
+			if (!proto && dst)
+				error(what,
+				      "TCP connections may have a single "
+				      "destination IP address");
 			dst = add_addr(dst, &saddr);
+		}
 	} while (argv[i]);
 
 	/* Bind if -s <port> <bind-address>:es were specified. */
-	if (src && sctp_bindx(sfd,
-			      (struct sockaddr *)src->saddr, src->naddrs,
-			      SCTP_BINDX_ADD_ADDR) < 0)
-		error_errno("sctp_bindx()");
+	if (src)
+	{
+		if (proto == IPPROTO_SCTP && sctp_bindx(sfd,
+				(struct sockaddr *)src->saddr, src->naddrs,
+				SCTP_BINDX_ADD_ADDR) < 0)
+			error_errno("sctp_bindx()");
+		else if (!proto && bind(sfd,
+				(struct sockaddr *)src->saddr, src->size) < 0)
+			error_errno("bind()");
+	}
 
 	/* Roll the drums. */
 	if (dst)
 	{	/* Client mode */
-		if (!prog) {
-			struct sctp_event_subscribe events;
+		int prompt;
 
-			/* Tell the SCTP stack which events
-			 * we're interested in. */
+		if (!prog && proto == IPPROTO_SCTP)
+		{
+			socklen_t optlen;
+			struct sctp_event_subscribe_nsn events;
+
+			/* Tell the SCTP stack which events we are
+			 * interested in.  First determine whether
+			 * the kernel knows about SCTP_PUSH_STATS_EVENT. */
+			optlen = sizeof(events);
+			if (getsockopt(sfd, SOL_SCTP, SCTP_EVENTS,
+				       &events, &optlen) < 0)
+				error_errno("getsockopt(SCTP_EVENTS)");
 			memset(&events, 0, sizeof(events));
-			events.sctp_association_event = 1;
-			events.sctp_address_event = 1;
-			events.sctp_shutdown_event = 1;
+			events.orig.sctp_association_event = 1;
+			events.orig.sctp_address_event = 1;
+			events.orig.sctp_shutdown_event = 1;
+			events.sctp_push_stats_event = 1;
 			if (setsockopt(sfd, SOL_SCTP, SCTP_EVENTS,
-				       &events, sizeof(events)) < 0)
+				       &events, optlen) < 0)
 				error_errno("setsockopt(SCTP_EVENTS)");
-		} // subscribe SCTP events
+		} /* subscribe to SCTP events */
 
 		/* Connect to $dst. */
-		if (sctp_connectx(sfd,
-				  (struct sockaddr *)dst->saddr, dst->naddrs,
-				  NULL) < 0)
+		if (proto == IPPROTO_SCTP && sctp_connectx(sfd,
+				(struct sockaddr *)dst->saddr, dst->naddrs,
+				NULL) < 0)
 			error_errno("sctp_connectx()");
+		else if (!proto && connect(sfd,
+				(struct sockaddr *)dst->saddr,
+				dst->size) < 0)
+			error_errno("connect()");
 
-		// Do we have a $prog:ram to execute with $sfd as stdin/out?
+		/* Execute $prog:ram with $sfd as stdin/out? */
 		if (prog)
-			// launch() doesn't return.
+			/* launch() doesn't return. */
 			launch(sfd, capital_ex, prog);
+
+		/* Don't print a prompt if stdin is not a tty. */
+		prompt = isatty(STDIN_FILENO);
+
+		/* Make sure we're not killed by SIGPIPE in write(),
+		 * so we can still report events. */
+		signal(SIGPIPE, SIG_IGN);
+
+		/* Report the number of sent messages periodically? */
+		if (Report_progress)
+		{
+			signal(SIGALRM, report_progress);
+			alarm(Report_progress);
+		}
 
 		/* Read the terminal and send it to the server until EOF. */
 		for (;;)
@@ -487,25 +747,55 @@ int main(int argc, char const *argv[])
 			char line[128];
 
 			/* Print the prompt. */
-			write(STDOUT_FILENO, "> ", 2);
+			if (prompt)
+				write(STDOUT_FILENO, "> ", 2);
 
 again:			/* Process SCTP events coming from $sfd. */
 			FD_ZERO(&fds);
-			FD_SET(STDIN_FILENO, &fds);
+			if (stdin)
+				FD_SET(STDIN_FILENO, &fds);
 			FD_SET(sfd, &fds);
-			select(sfd + 1, &fds, NULL, NULL, NULL);
+			if (select(sfd + 1, &fds, NULL, NULL, NULL) < 0
+					&& errno == EINTR)
+				goto again;
 			if (FD_ISSET(sfd, &fds))
 			{
-				read_sctp_notification(sfd,
-					primary.ss_family == AF_UNSPEC
-					? NULL : &primary);
+				if (!read_sctp_notification(sfd,
+						primary.ss_family == AF_UNSPEC
+						? NULL : &primary))
+					break;
+				if (prompt)
+					write(STDOUT_FILENO, "> ", 2);
 				goto again;
-			} /* read event on $sfd */
+			} else if (!FD_ISSET(STDIN_FILENO, &fds))
+				continue;
 
 			/* Read the terminal and send it to the server. */
-			if (!fgets(line, sizeof(line), stdin))
-				break;
-			write(sfd, line, strlen(line));
+			if (fgets(line, sizeof(line), stdin))
+			{
+				size_t len;
+
+				len = strlen(line);
+				if (len == 2 && !strcmp(line, "?\n"))
+				{
+					read_sctp_statistics(sfd);
+					continue;
+				}
+
+				if (write(sfd, line, len) < 0)
+				{
+					error_errno("write");
+					break;
+				}
+				NTransferred += len;
+			} else if (ferror(stdin) && errno == EINTR)
+			{
+				clearerr(stdin);
+			} else
+			{
+				shutdown(sfd, SHUT_RDWR);
+				stdin = NULL;
+			}
 		} /* forever */
 	} else
 	{	/* Server mode.  Accept connections until forever. */
@@ -513,8 +803,7 @@ again:			/* Process SCTP events coming from $sfd. */
 		signal(SIGCHLD, SIG_IGN);
 		for (;;)
 		{
-			int cfd, len;
-			char line[128];
+			int cfd;
 
 			assert((cfd = accept(sfd, NULL, NULL)) >= 0);
 
@@ -525,17 +814,53 @@ again:			/* Process SCTP events coming from $sfd. */
 
 				pid = fork();
 				if (!pid)
+				{
+					close(sfd);
 					launch(cfd, capital_ex, prog);
+				} else
+					close(cfd);
 				assert(pid > 0);
 				continue;
 			}
 
+			/* Report the number of received messages
+			 * every $Report_progress seconds? */
+			if (Report_progress)
+			{	/* report_progress() will set the alarm(). */
+				NTotal = NTransferred = 0;
+				signal(SIGALRM, report_progress);
+				report_progress(0);
+			}
+
 			/* Read $cfd and print it until EOF. */
-			while ((len = read(cfd, line, sizeof(line))) > 0)
+			for (;;)
 			{
+				int len;
+				char line[128];
+
+				len = read(cfd, line, sizeof(line));
+				if (len < 0 && errno == EINTR)
+					continue;
+				if (len < 0)
+					error_errno("read");
+				if (len <= 0)
+					break;
+
+				NTransferred += len;
 				line[len] = '\0';
 				printf("< %s", line);
 			}
+
+			/* Final reporting. */
+			if (Report_progress)
+			{
+				report_progress(0);
+				alarm(0);
+			}
+
+			if (print_stats)
+				read_sctp_statistics(cfd);
+
 			close(cfd);
 		} /* forever */
 	} /* client/server */
