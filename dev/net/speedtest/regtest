@@ -157,7 +157,7 @@ testcfg() {
 }
 
 # Clean up on exit.
-trap "killall speedtest" EXIT;
+trap "pkill speedtest || true" EXIT;
 testcfg server > regtest-server.log &
 time testcfg client > regtest-client.log;
 
