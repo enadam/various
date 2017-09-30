@@ -8,3 +8,4 @@ tgconscp.c		safe and simple scponlyc replacement
 apicsa.pl		mass-upload photos to Google Picasa
 apt-dl.pl		download and optionally extract Debian packages
 sexycat.c		iSCSI disk dumper
+phonebook.pl		look up someone in LDAP
