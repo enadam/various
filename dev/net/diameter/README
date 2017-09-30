@@ -1,0 +1,2 @@
+diadal.pl		Diameter message generator
+radiator.cc		Diameter testing peer (server or client)
