@@ -46,7 +46,7 @@
  *   --sender[=<duration>][/<intersleep>]
  *			Be the sender of the messages (default for clients)
  *			for <duration> seconds (a minute by default), and
- *			pauseing for <intersleep> miliseconds between writes
+ *			pausing for <intersleep> milliseconds between writes
  *			(default is none).
  *   --receiver		Be the receiver of the messages (default for servers).
  *			You may choose the client to be the receiver and
@@ -63,7 +63,7 @@
  *			real environment more closely.
  *   --quiet		Don't show the command line of external commands.
  *   --overall-stats	On the client side provide packet-level statistics
- *			about input/output traffic.  Not used to server-side.
+ *			about input/output traffic.  Not used on server-side.
  *			For clients this is the default statistics setting.
  *   --wide-stats	Likewise, but provide statistics per connection.
  *			Differs only from --overall-stats if <nprocs> > 1.
@@ -654,7 +654,7 @@ int main(int argc, char const *argv[])
 			/* iptables -I ... -j MYCHAIN */
 			command(be_quiet,
 				iptables, "-I", direction, "-j", MYCHAIN,
-			       	NULL, 0);
+				NULL, 0);
 		}
 
 		/* Open the connect()ions to @saddr. */
@@ -673,10 +673,8 @@ int main(int argc, char const *argv[])
 				/* Create a new @sfd because we've used up 
 				 * what we created a long ago. */
 				MUSTBE((sfd = socket(is_ipv6
-						     ? PF_INET6
-						     : PF_INET,
-						     SOCK_STREAM,
-						     proto)) >= 0);
+					? PF_INET6 : PF_INET, SOCK_STREAM,
+					proto)) >= 0);
 				sfds[i] = sfd;
 			}
 
@@ -722,9 +720,9 @@ int main(int argc, char const *argv[])
 				ssaddr = sizeof(saddr.ss);
 				MUSTBE(!getsockname(sfd, &saddr.sa, &ssaddr));
 				snprintf(cltport, sizeof(cltport), "%u",
-				  ntohs(saddr.sa.sa_family == AF_INET
-				       	? saddr.ip4.sin_port
-				       	: saddr.ip6.sin6_port));
+					ntohs(saddr.sa.sa_family == AF_INET
+						? saddr.ip4.sin_port
+						: saddr.ip6.sin6_port));
 
 				/* iptables -A MYCHAIN ... -j RETURN */
 				command(be_quiet,
@@ -772,7 +770,7 @@ int main(int argc, char const *argv[])
 				for (;;)
 				{
 					write(sfds[Buf.n % nprocs],
-					      Buf.c, sizeof(Buf));
+						Buf.c, sizeof(Buf));
 					Buf.n++;
 					if (intersleep.tv_sec
 							|| intersleep.tv_nsec)
@@ -942,7 +940,7 @@ int main(int argc, char const *argv[])
 		elapsed  = (finish.tv_sec  - start.tv_sec) * 1000;
 		elapsed += (finish.tv_nsec - start.tv_nsec) / 1000000;
 		printf("time: %u.%.4u,\tbuf.n: %u\n",
-		       elapsed / 1000, elapsed % 1000, Buf.n);
+			elapsed / 1000, elapsed % 1000, Buf.n);
 
 		/* Pause before we close the connection.  If we're !is_boss,
 		 * exit. */
