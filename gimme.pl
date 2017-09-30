@@ -596,7 +596,8 @@ sub main
 		or return;
 
 	$path = urldecode($r->url()->path());
-	print ~~localtime(), " ", $c->peerhost(), ": $path";
+	print ~~localtime(), " ", $c->peerhost(),
+		": ", $r->method(), ": ", $path;
 	$path = Path->new($path)->as_relative();
 	if ($r->method() ne 'GET')
 	{	# Filter out junk.
