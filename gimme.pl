@@ -37,12 +37,17 @@
 # is not efficient with large files.
 #
 # Special files:
-# -- If the requested path is a directory its contents are listed,
-#    sorted by last modification time.  There will be "Gimme!" links
-#    for directories that let clients download them in a single .tar
-#    archive.  This capability was the prime motivation to write Gimme.
-#    When creating a tarball symlinks are not followed.  These and
-#    other navigation links are not presented to robots.
+# -- If the requested path is a directory and there is not a .dirlist
+#    file therein, the directory's contents are listed, sorted by last
+#    modification time.  There will be "Gimme!" links for directories
+#    that let clients download them in a single .tar archive.  (This
+#    capability was the primary motivation for Gimme.)  When creating
+#    a tarball symlinks are not followed.  These and other navigation
+#    links are not presented to robots.
+# -- If a .dirlist file is present in the directory, its contents are
+#    returned as the directory listing.  .dirlist can also be a symlink
+#    pointing to another file or directory, in which case the target
+#    is returned to the client.
 # -- .dotfiles are not shown in directory listings, but they remain
 #    accessible by addressing them directly, so they are still public.
 # -- 00INDEX is a series of <file-name> <description> mappings, each
@@ -664,7 +669,55 @@ sub serve
 		$c->send_file_response($path);
 	} elsif (-d _)
 	{
-		send_dir($c, $r, $path);
+		my ($dirlist, $readlink);
+
+		# Return $dirlist if it exists.  Don't redo WWW-Authenticate
+		# in this case because from the client's perspective this is
+		# not a redirection.
+		$dirlist = $path->new()->add(".dirlist");
+		$readlink = readlink($dirlist);
+		if (defined $readlink)
+		{
+			my ($path_dev, $path_ino);
+			my ($list_dev, $list_ino);
+
+			# Make sure that $readlink != $path to avoid direct
+			# loops.  (Alas, indirect loops remain possible.)
+			($path_dev, $path_ino) = stat(_);
+			($list_dev, $list_ino) = stat($dirlist);
+			if (!defined $list_dev || !defined $list_ino)
+			{	# $dirlist is a dangling symlink.
+				print " (.dirlist ENOENT)";
+				$c->send_error(RC_INTERNAL_SERVER_ERROR);
+				return;
+			}
+			if ($list_dev == $path_dev && $list_ino == $path_ino)
+			{
+				print " (.dirlist ELOOP)";
+				$c->send_error(RC_INTERNAL_SERVER_ERROR);
+				return;
+			} elsif (-d _)
+			{	# $dirlist points to a directory.
+				send_dir($c, $r, $dirlist);
+				return;
+			}
+
+			$readlink = Path->new($readlink);
+			if ($readlink->is_absolute())
+			{
+				serve($c, $r, $readlink, 1);
+			} else
+			{
+				$path->add(@$readlink);
+				serve($c, $r, $path, 1);
+			}
+		} elsif (-e $dirlist)
+		{
+			serve($c, $r, $dirlist, 1);
+		} else
+		{
+			send_dir($c, $r, $path);
+		}
 	} else
 	{	# Special file, can't send it.
 		print " (special file)";
