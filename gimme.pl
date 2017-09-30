@@ -52,7 +52,11 @@
 # -- If .htaccess is present in a directory Authorization: is demanded
 #    from the client (but _not_ verified).
 # -- .headers: specify or override HTTP headers (e.g. Content-Type)
-#    when sending files from that directory.
+#    when sending files from that directory.  You can supply a custom
+#    status line with the X-Status-Code and X-Reason-Phrase headers.
+#    You can define "[common]" and "[default]" headers, or restrict
+#    them to apply to specific "[/files/, /files2/]" or the other way
+#    around ("[not /file1/, /file2/]").
 # >>>
 
 # Program code
@@ -184,11 +188,12 @@ sub send_basic_header
 sub send_file_response
 {
 	my ($self, $fname) = @_;
-	my $headers;
+	my ($headers, $basename);
 	local *FH;
 
 	$headers = Path->new($fname)->pop()->add(".headers");
 	$headers = $headers->as_string();
+	$basename = $$fname[-1];
 	$fname = $fname->as_string();
 
 	if (!open(FH, '<', $fname))
@@ -203,7 +208,8 @@ sub send_file_response
 	if (!$self->antique_client())
 	{
 		my ($fsize, $mtime);
-		my (@headers, $content_type, $encoding);
+		my (@status_line, @headers, %headers);
+		my ($content_type, $encoding);
 		local *HEADERS;
 
 		# Get $fname's $fsize and $mtime.
@@ -212,44 +218,104 @@ sub send_file_response
 		defined $fsize && defined $mtime
 			or warn "$fname: $!";
 
-		# HEADERS => @headers
+		# HEADERS => @status_line, @headers
+		my $section = "[common]";
 		if (open(HEADERS, '<', $headers))
 		{
+			LINE:
 			while (<HEADERS>)
 			{
+				my ($new_section, $header);
+
+				# Is it the beginning of a new $section?
 				chomp;
-				if (/^Content-Type:/i)
+				if ($_ eq "[common]" || $_ eq "[default]")
 				{
-					$content_type = 1;
-				} elsif (/^Content-Encoding:/i)
+					$section = $_;
+					next;
+				} elsif (s/^\[(.*)\]$/$1/)
 				{
-					$encoding = 1;
+					my $negative = s/^\s*not\b//;
+					while (s!^\s*/(.*?)/\s*,?!!)
+					{
+						if ($1 ne $basename)
+						{
+							next;
+						} elsif ($negative)
+						{	# Negative match.
+							undef $section;
+							next LINE;
+						} else
+						{	# Positive match.
+							$section = "positive";
+							next LINE;
+						}
+					}
+
+					$section = $negative
+						? "negative" : undef;
+					next;
+				} elsif (!defined $section)
+				{	# This section is not applicable.
+					next;
 				}
-				push(@headers, $_);
+
+				# Don't set @status_line if we're in the
+				# [default] section and it's defined already.
+				if (s/^X-Status-Code:\s*//i)
+				{
+					$section eq "[default]"
+						&& defined $status_line[0]
+						or $status_line[0] = $_;
+					next;
+				} elsif (s/^X-Reason-Phrase:\s*//i)
+				{
+					$section eq "[default]"
+						&& defined $status_line[1]
+						or $status_line[1] = $_;
+					next;
+				}
+
+				($header) = $_ =~ /^([^:]+)\s*:/;
+				defined $header
+					or next;
+				$header = lc($header);
+
+				if ($section ne "[default]"
+					|| !$headers{$header})
+				{
+					push(@headers, $_);
+					$headers{$header} = 1;
+				}
 			}
 			close(HEADERS);
 		}
 
-		# Guess Content-Type and/or Content-Encoing if not included
-		# in @headers.
-		if (!$content_type && !$encoding)
+		# Add an OK status code if we only got the reason phrase.
+		!@status_line || defined $status_line[0]
+			or $status_line[0] = RC_OK;
+
+		# Guess Content-Type and/or Content-Encoing if they are
+		# not included in the %headers.
+		if (!$headers{'content-type'}
+			&& !$headers{'content-encoding'})
 		{
 			($content_type, $encoding) = guess_media_type($fname);
-		} elsif (!$content_type)
+		} elsif (!$headers{'content-type'})
 		{
 			$content_type = guess_media_type($fname);
 			$encoding = undef;
-		} elsif (!$encoding)
+		} elsif (!$headers{'content-encoding'})
 		{
-			(undef, $encoding) = guess_media_type($fname);
 			$content_type = undef;
+			(undef, $encoding) = guess_media_type($fname);
 		} else
 		{
 			$content_type = $encoding = undef;
 		}
 
 		# Send all the headers.
-		$self->send_basic_header();
+		$self->send_basic_header(@status_line);
 		print $self "Content-Type: $content_type\r\n"
 			if defined $content_type;
 		print $self "Content-Encoding: $encoding\r\n"
