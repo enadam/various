@@ -10,3 +10,5 @@ mafwturbator.pl		funny C identifier generator
 modinject.pl		bundle Perl modules with scripts in a single file
 arpextra.py		enhanced argparse
 mkdebug			debug package creator
+defun.pl		reduce long C++ __PRETTY_FUNCTION__ logprints
+			(TAS-specific)
