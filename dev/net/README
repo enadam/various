@@ -2,3 +2,4 @@ speedtest/		measure IPv4/IPv6 TCP/SCTP connection speed
 diameter/		testing tools for the Diameter protocol
 pcap/			work with .pcap files
 sicktp.c		SCTP and TCP swiss-army knife
+mininmap.c		unobtrusive and efficient TCP and SCTP port scanner
