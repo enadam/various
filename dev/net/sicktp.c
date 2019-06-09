@@ -9,7 +9,7 @@
  *
  * Synopsis:
  *   sicktp [-46] [-p1|-p2|-T] [-P <seconds>] [-S] \
- *          {-s[r] <port> <bind-addr> | d[p] <port> <connect-addr>}...
+ *          {-s[r] <port> <bind-addr> | -d[p] <port> <connect-addr>}...
  *          [-[xX] <program> [<arguments>]...]
  *
  * If left unspecified, IPv4 is assumed as network protocol.  This case
@@ -126,12 +126,14 @@ struct sctp_push_stats_event
 /* Subscription interface for SCTP_PUSH_STATS_EVENT. */
 struct sctp_event_subscribe_nsn
 {
-    struct sctp_event_subscribe orig;
+	struct sctp_event_subscribe orig;
 
-	// As newer and newer fields are added to the official structure,
-	// this reserve gets smaller and smaller.  The intention is that
-	// our new field be in a predictable position--at the end of the
-	// struct.  This makes the size of the structure exactly 16 bytes.
+	/*
+	 * As newer and newer fields are added to the official structure,
+	 * this reserve gets smaller and smaller.  The intention is that
+	 * our new field be in a predictable position--at the end of the
+	 * struct.  This makes the size of the structure exactly 16 bytes.
+	 */
 	uint8_t reserved[16 - sizeof(struct sctp_event_subscribe) - 1];
 
 	uint8_t sctp_push_stats_event;
@@ -359,7 +361,7 @@ static void print_sctp_statistics(struct sctp_assoc_stats const *stats)
 			stats->snd_bytes, stats->retrans);
 } /* print_sctp_statistics */
 
-/* Read and the statistical counters of an SCTP association. */
+/* Read and dump the statistical counters of an SCTP association. */
 static void read_sctp_statistics(int sfd)
 {
 #ifdef SCTP_GET_ASSOC_STATS
