@@ -6,8 +6,8 @@
 # The exported directories will be browseable and downloadable as tarballs.
 #
 # Synopsis:
-# ./gimme.pl [-C] [<address> | <dir>]
-# ./gimme.pl [-C]  <address>   <dir>
+# ./gimme.pl [-C] [--fork[=<max-procs>]] [<address> | <dir>]
+# ./gimme.pl [-C] [--fork[=<max-procs>]]  <address>   <dir>
 #
 # <address> is the one to listen on, defaulting to localhost.  Use "all"
 # to make the service available on all interfaces.  By default the port
@@ -19,6 +19,11 @@
 # clients will have access to it and its children, but not its parent (/).
 # Non-regular files (sockets, FIFO:s and device nodes) are not served.
 # If not specified otherwise <dir> will be the current working directory.
+#
+# Unless --fork is specified files and tarballs are served by a single
+# process, blocking subsequent requests.  Otherwise a new process is started
+# until <max-procs> is reached, then requests are served sequentially.
+# If <max-procs> is omitted or 0 no such limit is imposed.
 #
 # If the -C flag is present Gimme chroot()s to <dir>.  This will disable
 # directory downloading unless you make tar(1) available in the chroot.
@@ -335,7 +340,7 @@ sub send_file_response
 		print $self "\r\n";
 	}
 
-	$self->send_file(\*FH)
+	main::in_subprocess(sub { $self->send_file(\*FH) })
 		unless $self->head_request();
 	return RC_OK;
 }
@@ -343,6 +348,7 @@ sub send_file_response
 
 package main;
 use strict;
+use POSIX qw(WNOHANG);
 use Errno qw(ENOENT ENOTDIR EPERM EACCES);
 use HTTP::Daemon;
 use HTTP::Status;
@@ -361,6 +367,13 @@ chomp($SITE);
 
 # Don't tire these user agents with navigation bar or advertisement.
 my $ROBOTS = qr/\b(?:wget|googlebot)\b/i;
+
+# Value of the --fork option.
+my $Opt_forking;
+
+# PID of processess fork()ed by in_subprocess().  Used to determine
+# whether we have enough quota for another child.
+my %Children;
 
 # HTML generation <<<
 sub escape
@@ -408,6 +421,47 @@ sub mklink
 }
 # HTML generation >>>
 
+# Subprocess management <<<
+# If conditions permit fork() a subprocess and execute $fun() within it.
+# Otherwise just call the function.
+sub in_subprocess
+{
+	my $fun = shift;
+	my $child;
+
+	if (defined $Opt_forking
+		&& (!$Opt_forking || keys(%Children) < $Opt_forking))
+	{	# We're a forking server and we have free quota.
+		if (!defined ($child = fork()))
+		{
+			warn "fork(): $!";
+		} elsif ($child)
+		{	# Parent, register $child.
+			$Children{$child} = 1;
+		} else
+		{	# Child, ignore SIGCHLD because we don't need
+			# child_exited() to manage the grand-%Children.
+			$SIG{'CHLD'} = "IGNORE";
+		}
+	}
+
+	# Call $fun() if didn't fork() or we're the child.
+	# Then exit if we're the child.
+	&$fun() if !defined $child || !$child;
+	exit 0  if  defined $child && !$child;
+}
+
+# The SIGCHLD handler if $Opt_forking.
+sub child_exited
+{
+	my $pid;
+
+	# Reap all finished subprocesses.
+	delete $Children{$pid}
+		while defined ($pid = waitpid(-1, WNOHANG)) && $pid > 0;
+}
+# Subprocesses >>>
+
 # Functionality <<<
 sub read_chunk
 {
@@ -448,6 +502,7 @@ sub send_tar
 {
 	my ($client, $path) = @_;
 	my $dir;
+	local *TAR;
 
 	# The last component is expected to be the suggested file name.
 	$path->pop();
@@ -469,11 +524,13 @@ sub send_tar
 	open(TAR, '-|', qw(tar cz), '-C', $path,
 		'--transform', "s!^\\.\$!$dir!;s!^\\./!$dir/!", '.')
 		or return $client->send_error(RC_SERVICE_UNAVAILABLE);
-	$client->send_response(HTTP::Response->new(
-		RC_OK, 'Here you go',
-		[ 'Content-Type' => 'application/x-tar' ],
-		sub { read_chunk(*TAR) }));
-	close(TAR);
+	in_subprocess(sub
+	{
+		$client->send_response(HTTP::Response->new(
+			RC_OK, 'Here you go',
+			[ 'Content-Type' => 'application/x-tar' ],
+			sub { read_chunk(*TAR) }));
+	});
 }
 
 sub get_index
@@ -791,6 +848,12 @@ unless ($^S)
 		and $chroot = 1
 		and shift;
 
+	if (@ARGV && $ARGV[0] =~ /^--fork(?:=(\d+))?$/)
+	{
+		$Opt_forking = $1 || 0;
+		shift;
+	}
+
 	if (@ARGV == 1)
 	{
 		-d $ARGV[0] ? $dir : $addr = $ARGV[0];
@@ -845,6 +908,8 @@ $SIG{'HUP'} = sub
 	seek(GIMME, 0, 0);
 	die "gimme decides to die";
 };
+$SIG{'CHLD'} = \&child_exited
+	if defined $Opt_forking;
 
 # Spin the main loop.
 eval { main($d) } or not $@ or print $@ until $^S;
