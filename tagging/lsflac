@@ -75,7 +75,7 @@ then
 	else
 		for ext in '*.Flac' '*.FLAC' '*.flac';
 		do
-			eval set -- $ext "$@";
+			set -- $ext "$@";
 			[ $# -gt 0 -a "$1" = "$ext" -a ! -f "$ext" ] \
 				&& shift;
 		done
