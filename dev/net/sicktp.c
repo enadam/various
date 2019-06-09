@@ -76,10 +76,6 @@
 #define DFLT_SRTO_MIN			 500
 #define DFLT_SRTO_MAX			1000
 
-#define SCTP_GET_ASSOC_STATS		 150
-#define SCTP_STATS_READZERO		 0x1
-#define SCTP_PUSH_STATS_EVENT		(SCTP_AUTHENTICATION_INDICATION + 7)
-
 /* Type definitions */
 /* Tightly packed pack of sockaddr_in:s and sockaddr_in6:es as buiilt
  * by add_addr() for the likings of sctp_bindx() and sctp_connectx(). */
@@ -89,56 +85,6 @@ struct addresses_st
 	size_t size;
 	char saddr[];
 };
-
-#ifdef SCTP_GET_ASSOC_STATS
-/* SCTP association statistics. */
-struct sctp_assoc_stats
-{
-	uint32_t rcv_packets;		/* received SCTP packets	*/
-	uint32_t rcv_ctrl_packets;	/* received control chunks	*/
-	uint32_t rcv_bytes;		/* received bytes (IP payload)	*/
-	uint32_t dup_tsn;		/* duplicate transmission
-					 * sequence numbers		*/
-	uint32_t snd_packets;		/* sent SCTP packets		*/
-	uint32_t snd_ctrl_packets;	/* sent control chunks		*/
-	uint32_t snd_bytes;		/* sent bytes (IP payload)	*/
-	uint32_t retrans;		/* retransmissions		*/
-};
-
-/* Interface for user to fetch SCTP association statistics. */
-struct sctp_getassocstats
-{
-	sctp_assoc_t sstats_assoc_id;
-	struct sctp_assoc_stats stats;
-	uint8_t action;
-} __attribute__((packed, aligned(4)));
-
-/* Payload of SCTP_PUSH_STATS_EVENT. */
-struct sctp_push_stats_event
-{
-	uint16_t spse_type;
-	uint16_t spse_flags;
-	uint32_t spse_length;
-	sctp_assoc_t spse_assoc_id;
-	struct sctp_assoc_stats spse_stats;
-};
-
-/* Subscription interface for SCTP_PUSH_STATS_EVENT. */
-struct sctp_event_subscribe_nsn
-{
-	struct sctp_event_subscribe orig;
-
-	/*
-	 * As newer and newer fields are added to the official structure,
-	 * this reserve gets smaller and smaller.  The intention is that
-	 * our new field be in a predictable position--at the end of the
-	 * struct.  This makes the size of the structure exactly 16 bytes.
-	 */
-	uint8_t reserved[16 - sizeof(struct sctp_event_subscribe) - 1];
-
-	uint8_t sctp_push_stats_event;
-};
-#endif /* SCTP_GET_ASSOC_STATS */
 
 /* Program code */
 /* Utilities */
@@ -350,33 +296,30 @@ static void setup_sctp_special(int sfd)
 		error_errno("setsockopt(SCTP_NODELAY)");
 } /* setup_sctp_special */
 
-/* Dump the contents of an sctp_assoc_stats. */
-static void print_sctp_statistics(struct sctp_assoc_stats const *stats)
-{
-	printf(	"rcv(pkt: %u, ctrl: %u, oct: %u, dup: %u), "
-		"snd(pkt: %u, ctrl: %u, oct: %u, retrans: %u)\n",
-		stats->rcv_packets, stats->rcv_ctrl_packets,
-			stats->rcv_bytes, stats->dup_tsn,
-		stats->snd_packets, stats->snd_ctrl_packets,
-			stats->snd_bytes, stats->retrans);
-} /* print_sctp_statistics */
-
 /* Read and dump the statistical counters of an SCTP association. */
 static void read_sctp_statistics(int sfd)
 {
 #ifdef SCTP_GET_ASSOC_STATS
-	struct sctp_getassocstats stats;
-	socklen_t sstats = sizeof(stats);
+	socklen_t sstats;
+	struct sctp_assoc_stats stats;
 
+	sstats = sizeof(stats);
 	memset(&stats, 0, sizeof(stats));
-	stats.action = SCTP_STATS_READZERO;
 	if (getsockopt(sfd, SOL_SCTP, SCTP_GET_ASSOC_STATS,
 			&stats, &sstats) < 0)
+	{
 		fprintf(stderr, "SCTP_GET_ASSOC_STATS: %m\n");
-	else
-		print_sctp_statistics(&stats.stats);
-#else /* ! SCTP_GET_ASSOC_STATS */
-	fputs("SCTP_GET_ASSOC_STATS: not implemented\n", stderr);
+		return;
+	}
+
+	printf(	"rcv(pkt: %llu, ctrl: %llu, dup: %llu), "
+		"snd(pkt: %llu, ctrl: %llu, retrans: %llu)\n",
+		stats.sas_ipackets, stats.sas_ictrlchunks,
+			stats.sas_idupchunks,
+		stats.sas_opackets, stats.sas_octrlchunks,
+			stats.sas_rtxchunks);
+#else	/* ! SCTP_GET_ASSOC_STATS */
+	fputs("SCTP statistics are not available.\n", stderr);
 #endif
 } /* read_sctp_statistics */
 
@@ -490,12 +433,6 @@ static int read_sctp_notification(int sfd,
 	case SCTP_SHUTDOWN_EVENT:
 		fputs("SCTP_SHUTDOWN_EVENT\n", stderr);
 		return 0;
-	case SCTP_PUSH_STATS_EVENT: {
-		const struct sctp_push_stats_event *spse = (void *)&buf[0];
-		fprintf(stderr, "SCTP_PUSH_STATS_EVENT: ");
-		print_sctp_statistics(&spse->spse_stats);
-		break;
-	} /* case */
 	default:
 		fprintf(stderr, "notification 0x%x\n",
 			notif->sn_header.sn_type);
@@ -694,20 +631,16 @@ int main(int argc, char const *argv[])
 		if (!prog && proto == IPPROTO_SCTP)
 		{
 			socklen_t optlen;
-			struct sctp_event_subscribe_nsn events;
+			struct sctp_event_subscribe events;
 
-			/* Tell the SCTP stack which events we are
-			 * interested in.  First determine whether
-			 * the kernel knows about SCTP_PUSH_STATS_EVENT. */
-			optlen = sizeof(events);
-			if (getsockopt(sfd, SOL_SCTP, SCTP_EVENTS,
-				       &events, &optlen) < 0)
-				error_errno("getsockopt(SCTP_EVENTS)");
+			/* Tell the SCTP stack which events
+			 * we are interested in. */
 			memset(&events, 0, sizeof(events));
-			events.orig.sctp_association_event = 1;
-			events.orig.sctp_address_event = 1;
-			events.orig.sctp_shutdown_event = 1;
-			events.sctp_push_stats_event = 1;
+			events.sctp_association_event = 1;
+			events.sctp_address_event = 1;
+			events.sctp_shutdown_event = 1;
+			optlen = sizeof(events);
+
 			if (setsockopt(sfd, SOL_SCTP, SCTP_EVENTS,
 				       &events, optlen) < 0)
 				error_errno("setsockopt(SCTP_EVENTS)");
