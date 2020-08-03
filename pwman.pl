@@ -373,23 +373,70 @@ if ($opt_overview)
 	overview($ini);
 } elsif ($opt_interactive)
 {	# Let the user pick what to view or copy interactively.
+	# Only load readline-support in interactive mode.
+	require Term::ReadLine;
+	my ($term, @completions);
+
+	$term = Term::ReadLine->new('getpw');
+	$term->ornaments(0);
+
+	# Set up tab-completion of sections and keys.
+	for my $section ($ini->Sections())
+	{
+		push(@completions, $section);
+		foreach my $key ($ini->Parameters($section))
+		{
+			push(@completions, $key)
+				if $section eq "default";
+			push(@completions, "$section/$key")
+		}
+	}
+
+	# Escape \-es and spaces to make tab-completion work on words
+	# containing escaped spaces and backslashes.
+	s/( |\\)/\\$1/g
+		for @completions;
+
+	# The first word can be a command.
+	$term->Attribs->{'completion_function'} = sub
+	{
+		my ($text, $line, $start) = @_;
+		substr($line, 0, $start) =~ /^\s*$/
+			? (@completions, qw(edit reveal view copy))
+			: @completions;
+	};
+
+	# A space is quoted if it's preceded by a \, but not \\.
+	$term->Attribs->{'char_is_quoted_p'} = sub
+	{
+		my ($line, $index) = @_;
+		return reverse(substr($line, 0, $index+1)) =~
+			/^ \\(?:\\\\)*(?!\\)/;
+	};
+
+	$term->Attribs->{'completer_word_break_characters'} =~ s/\\//;
+	$term->Attribs->{'completer_quote_characters'} = "\\";
+
+	# The main loop.
 	for (;;)
 	{
 		my $what;
 
-		do
-		{
-			local $\ = "";
-			print "? ";
-		};
-
 		# Exit silently if the user hit ^D.
-		if (!defined ($what = readline))
+		if (!defined ($what = $term->readline("? ")))
 		{
 			print "";
 			last;
 		}
-		chomp($what);
+
+		# Strip whitespace.
+		$what =~ s/^\s+//;
+		$what =~ s/\s+$//;
+
+		# Add the stripped input to the history.
+		$term->remove_history($term->where_history())
+			if $term->Features->{'autohistory'};
+		$term->add_history($what);
 
 		my $ret = eval
 		{
@@ -428,10 +475,12 @@ if ($opt_overview)
 				$ini->OutputConfig();
 			} elsif ($what =~ s/^view\s+//)
 			{
+				$what =~ s/\\( |\\)/$1/g;
 				view_or_copy($ini, "view", $what);
 			} else
 			{
 				$what =~ s/^copy\s+//;
+				$what =~ s/\\( |\\)/$1/g;
 				view_or_copy($ini, "copy", $what);
 			}
 			return 1;
