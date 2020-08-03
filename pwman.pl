@@ -19,6 +19,9 @@
 #   exits and the secret is deleted from the selection.  -t 0 disables the
 #   timeout.  This case press <Enter> to quit when you're finished.
 #
+# pwman.pl --find|-f <vault>
+#   Return the vault that woule be opened.
+#
 # pwman.pl --edit|-w <vault>
 #   Edit the <vault> with your $VISUAL editor.
 #
@@ -129,6 +132,7 @@ sub usage
 	print $fh "";
 	print $fh "Usage:";
 	print $fh "  $me <vault> [[<section>/]<key>]";
+	print $fh "  $me --find|-f <vault>";
 	print $fh "  $me --edit|-w <vault>";
 	print $fh "  $me --all|-a <vault>";
 	print $fh "  $me --view|-v <section> <vault>";
@@ -290,7 +294,7 @@ sub view_or_copy
 }
 
 # Main starts here.
-my ($opt_edit, $opt_view_all, $opt_view, $opt_copy);
+my ($opt_find, $opt_edit, $opt_view_all, $opt_view, $opt_copy);
 my ($opt_overview, $opt_interactive);
 my (@modes, $vault, $ini);
 
@@ -306,6 +310,7 @@ $Opt_timeout = 5;
 Getopt::Long::Configure(qw(gnu_getopt));
 exit(1) unless GetOptions(
 	'h|help'	=> sub { usage(0) },
+	'f|find'	=> \$opt_find,
 	'w|edit'	=> \$opt_edit,
 	'a|all'		=> \$opt_view_all,
 	'v|view=s'	=> \$opt_view,
@@ -320,8 +325,9 @@ exit(1) unless GetOptions(
 $vault = find_vault(shift);
 
 @modes = grep(defined $_,
-	($opt_edit, $opt_view_all, $opt_view, $opt_copy,
-	$opt_overview, $opt_interactive));
+	($opt_find, $opt_edit,
+		$opt_view_all, $opt_view, $opt_copy,
+		$opt_overview, $opt_interactive));
 if (@ARGV)
 {	# $ARGV[0] is what to copy to the clipboard.
 	usage() if @modes;
@@ -335,7 +341,11 @@ if (@ARGV)
 	usage();
 }
 
-if ($opt_edit)
+if ($opt_find)
+{
+	print $vault;
+	exit;
+} elsif ($opt_edit)
 {	# Edit $vault.
 	exec($ENV{'VISUAL'}, $vault);
 } elsif ($opt_view_all)
