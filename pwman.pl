@@ -433,10 +433,19 @@ if ($opt_overview)
 		$what =~ s/^\s+//;
 		$what =~ s/\s+$//;
 
-		# Add the stripped input to the history.
+		# Add the stripped input to the history or replace it
+		# with the previous command.
 		$term->remove_history($term->where_history())
 			if $term->Features->{'autohistory'};
-		$term->add_history($what);
+		if ($what ne "!!")
+		{
+			$term->add_history($what);
+		} elsif (!defined ($what = $term->history_get(
+						$term->where_history())))
+		{
+			print STDERR "No previous command.";
+			next;
+		}
 
 		my $ret = eval
 		{
@@ -450,6 +459,8 @@ if ($opt_overview)
 					"???";
 				print "exit, q                  - ",
 					"I'm done";
+				print "!!                       - ",
+					"do it again";
 				print "edit                     - ",
 					"edit the vault file";
 				print "<Enter>                  - ",
