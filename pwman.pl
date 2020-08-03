@@ -2,47 +2,47 @@
 #
 # pwman.pl -- simple password manager
 #
-# Take a gpg-encrypted INI-file from $SECRETS_DIR and copy one of the secret
-# values (a password for example) to the primary X selection, from which you
+# Take a gpg-encrypted INI-file from $VAULTS and copy one of its secrets
+# (a password for example) to the primary X selection, from which you
 # can paste it in another window with the middle button of the mouse.
 #
 # To run the Config::IniFiles perl module (libconfig-inifiles-perl in Debian),
 # GnuPG and xsel(1) must be installed.
 #
 # Usage: <<<
-# pwman.pl [--timeout|-t <seconds>] <secrets> [[<section>/]<key>]
-#   Copy the <key> ("password" by default) from one of <secrets>' <section>s
-#   (the "default" one if unspecified).  <secrets> is the prefix of a file
-#   under $SECRETS_DIR.  You have <seconds> time (5 by default) to paste
-#   the secret value.  After that the program exits and the secret is
-#   deleted from the selection.  -t 0 disables the timeout.  This case
-#   press <Enter> to quit when you're finished.
+# pwman.pl [--timeout|-t <seconds>] <vault> [[<section>/]<key>]
+#   Copy the secret value of <key> ("password" by default) from one of the
+#   <vault>'s <section>s (the "default" one if unspecified).  <vault> is
+#   the case-insensitive prefix of an INI-file's name under $VAULTS which
+#   contains the secrets (~/.config/pwman hardwired).  You have <seconds>
+#   time (5 by default) to paste the secret value.  After that the program
+#   exits and the secret is deleted from the selection.  -t 0 disables the
+#   timeout.  This case press <Enter> to quit when you're finished.
 #
-# pwman.pl --edit|-w <secrets>
-#   Edit the <secrets> with your $VISUAL editor.
+# pwman.pl --edit|-w <vault>
+#   Edit the <vault> with your $VISUAL editor.
 #
-# pwman.pl --all|-a <secrets>
-#   Show the <secrets> file as-is in plaintext.
+# pwman.pl --all|-a <vault>
+#   Show the <vault> as-is in plaintext.
 #
-# pwman.pl --view|-v <section> <secrets>
+# pwman.pl --view|-v <section> <vault>
 #   Show <section>'s all keys and secret values.
 #
-# pwman.pl --view|-v [<section>/]<key> <secrets>
+# pwman.pl --view|-v [<section>/]<key> <vault>
 #   Show the specified <key>'s secret value.
 #
-# pwman.pl --copy|-c [<section>/]<key> [--timeout|-t <seconds>] <secrets>
+# pwman.pl --copy|-c [<section>/]<key> [--timeout|-t <seconds>] <vault>
 #   Copy the specified <key>'s secret value.
 #
-# pwman.pl --overview|-l <secrets>
-#   Show the sections and keys in the <secrets> file, but not the secret
-#   values.
+# pwman.pl --overview|-l <vault>
+#   Show the sections and keys in the <vault>, but not the secret values.
 #
-# pwman.pl --interactive|-i <secrets>
-#   Open <secrets> then prompt for your commands to see or copy secret values.
+# pwman.pl --interactive|-i <vault>
+#   Open the <vault> then prompt for your commands to see or copy secrets.
 #   Enter '?' to see the options.
 # >>>
 #
-# A <secrets> file (for example "shops.gpg") could be: <<<
+# A <vault> file (for example "shops.gpg") could be: <<<
 #
 # # This is the default <section>.
 # username = me@mine.org
@@ -97,7 +97,7 @@ use Getopt::Long;
 use Config::IniFiles;
 
 # Constants
-my $SECRETS_DIR = "$ENV{'HOME'}/.config/pwman";
+my $VAULTS = "$ENV{'HOME'}/.config/pwman";
 my @GPG = qw(gpg --batch --quiet --decrypt --);
 my @XSEL = qw(xsel --input --logfile /dev/null --nodetach);
 
@@ -129,21 +129,21 @@ sub usage
       	print $fh "See $0 for the complete documentation.";
 	print $fh "";
 	print $fh "Usage:";
-	print $fh "  $me <secrets> [[<section>/]<key>]";
-	print $fh "  $me --edit|-w <secrets>";
-	print $fh "  $me --all|-a <secrets>";
-	print $fh "  $me --view|-v <section> <secrets>";
-	print $fh "  $me --view|-v [<section>/]<key> <secrets>";
+	print $fh "  $me <vault> [[<section>/]<key>]";
+	print $fh "  $me --edit|-w <vault>";
+	print $fh "  $me --all|-a <vault>";
+	print $fh "  $me --view|-v <section> <vault>";
+	print $fh "  $me --view|-v [<section>/]<key> <vault>";
 	print $fh "  $me --copy|-c [<section>/]<key> ",
-			"[--timeout|-t <seconds>] <secrets>";
-	print $fh "  $me --overview|-l <secrets>";
-	print $fh "  $me --interactive|-i <secrets>";
+			"[--timeout|-t <seconds>] <vault>";
+	print $fh "  $me --overview|-l <vault>";
+	print $fh "  $me --interactive|-i <vault>";
 
 	exit($error);
 }
 
-# Find $fname in $SECRETS_DIR and its subdirectories.
-sub find_secrets
+# Find a file matching $prefix in $VAULTS and its subdirectories.
+sub find_vault
 {
 	my $fname = lc(shift);
 	my ($regexp, @secrets);
@@ -157,7 +157,7 @@ sub find_secrets
 			push(@secrets, $File::Find::name)
 				if -r && $_ =~ $regexp;
 		},
-	}, $SECRETS_DIR);
+	}, $VAULT);
 
 	if (!@secrets)
 	{
@@ -265,7 +265,7 @@ sub view_or_copy
 # Main starts here.
 my ($opt_edit, $opt_view_all, $opt_view, $opt_copy);
 my ($opt_overview, $opt_interactive);
-my (@modes, $secrets, $ini);
+my (@modes, $vault, $ini);
 
 $\ = "\n";
 $SIG{'__DIE__'} = sub
@@ -287,10 +287,10 @@ exit(1) unless GetOptions(
 	'l|overview'	=> \$opt_overview,
 	'i|interactive'	=> \$opt_interactive);
 
-# Find the $secrets to read the key from.
+# Find the $vault to read the secrets from.
 @ARGV > 0
 	or usage(0);
-$secrets = find_secrets(shift);
+$vault = find_vault(shift);
 
 @modes = grep(defined $_,
 	($opt_edit, $opt_view_all, $opt_view, $opt_copy,
@@ -309,24 +309,24 @@ if (@ARGV)
 }
 
 if ($opt_edit)
-{	# Edit $secrets.
-	exec($ENV{'VISUAL'}, $secrets);
+{	# Edit $vault.
+	exec($ENV{'VISUAL'}, $vault);
 } elsif ($opt_view_all)
-{	# Show the whole $secrets file in cleartext?
-	exec(@GPG, $secrets)
+{	# Show the whole $vault in cleartext?
+	exec(@GPG, $vault)
 		or die "$GPG[0]: $!";
 }
 
-# Decrypt and read $secrets into $ini.
-open(GPG, '-|', @GPG, $secrets)
+# Decrypt and read the contents of $vault into $ini.
+open(GPG, '-|', @GPG, $vault)
 	or die "$GPG[0]: $!";
 $ini = Config::IniFiles->new(-file => \*GPG, -fallback => "default");
 close(GPG) # Wait until @GPG finishes to see if there was an error.
 	or exit($? >> 8);
 if (!defined $ini)
-{	# Syntax error in $secrets.
+{	# Syntax error in the $vault.
 	$, = "\n";
-	print STDERR "$secrets:";
+	print STDERR "$vault";
 	print STDERR @Config::IniFiles::errors;
 	exit 1;
 }
@@ -367,12 +367,11 @@ if ($opt_overview)
 				print "exit, q                  - ",
 					"I'm done";
 				print "edit                     - ",
-					"edit the secrets file";
+					"edit the vault file";
 				print "<Enter>                  - ",
-					"see the overview of the ",
-					"secrets file";
+					"see an overview of the vault";
 				print "reveal                   - ",
-					"show the entire secrets file";
+					"show the entire vault";
 				print "view <section>           - ",
 					"view the selected <section>";
 				print "view [<section>/]<key>   - ",
@@ -385,7 +384,7 @@ if ($opt_overview)
 				overview($ini);
 			} elsif ($what eq "edit")
 			{
-				system($ENV{'VISUAL'}, $secrets);
+				system($ENV{'VISUAL'}, $vault);
 			} elsif ($what eq "reveal")
 			{
 				local $\ = "";
