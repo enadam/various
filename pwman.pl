@@ -2,7 +2,7 @@
 #
 # pwman.pl -- simple password manager
 #
-# Take a gpg-encrypted INI-file from $VAULTS and copy one of its secrets
+# Take a gpg-encrypted INI-file from @VAULTS and copy one of its secrets
 # (a password for example) to the primary X selection, from which you
 # can paste it in another window with the middle button of the mouse.
 #
@@ -13,7 +13,7 @@
 # pwman.pl [--timeout|-t <seconds>] <vault> [[<section>/]<key>]
 #   Copy the secret value of <key> ("password" by default) from one of the
 #   <vault>'s <section>s (the "default" one if unspecified).  <vault> is
-#   the case-insensitive prefix of an INI-file's name under $VAULTS which
+#   the case-insensitive prefix of an INI-file's name under @VAULTS which
 #   contains the secrets (~/.config/pwman hardwired).  You have <seconds>
 #   time (5 by default) to paste the secret value.  After that the program
 #   exits and the secret is deleted from the selection.  -t 0 disables the
@@ -91,13 +91,12 @@
 
 # Modules
 use strict;
-use File::Find;
 use IPC::Open2;
 use Getopt::Long;
 use Config::IniFiles;
 
 # Constants
-my $VAULTS = "$ENV{'HOME'}/.config/pwman";
+my @VAULTS = ("$ENV{'HOME'}/.config/pwman");
 my @GPG = qw(gpg --batch --quiet --decrypt --);
 my @XSEL = qw(xsel --input --logfile /dev/null --nodetach);
 
@@ -142,32 +141,60 @@ sub usage
 	exit($error);
 }
 
-# Find a file matching $prefix in $VAULTS and its subdirectories.
+# Find a file matching $prefix in @VAULTS and its subdirectories.
 sub find_vault
 {
-	my $fname = lc(shift);
-	my ($regexp, @secrets);
+	my $prefix = shift;
+	my ($is_absolute, @dirs);
+	my ($pattern, @prefix_matches, @full_matches);
 
-	# Match file names by prefix.
-	$regexp = qr/^\Q$fname\E.*\.gpg$/i;
-	find({
-		follow => 1,
-		wanted => sub
+	@dirs = @VAULTS;
+	$is_absolute = $prefix =~ s!^/+!!;
+	if ($is_absolute && $prefix =~ s!(.*)/+!!)
+	{	# Only search in dirname($prefix).
+		$_ = "$_/$1" for @dirs;
+
+	}
+	$pattern = qr!^.*/\Q$prefix\E(.*)\.gpg$!i;
+
+	# Search all subdirectories of @dirs (except if $is_absolute).
+	while (@dirs)
+	{
+		my ($dir, $fname);
+
+		$dir = shift(@dirs);
+		for $fname (<$dir/*>)
 		{
-			push(@secrets, $File::Find::name)
-				if -r && $_ =~ $regexp;
-		},
-	}, $VAULT);
+			unshift(@dirs, $fname)
+				if !$is_absolute && -d $fname;
+			next if ! -f _;
 
-	if (!@secrets)
+			my ($postfix) = $fname =~ $pattern;
+			if ($postfix)
+			{
+				push(@prefix_matches, $fname);
+			} elsif (defined $postfix)
+			{
+				push(@full_matches, $fname);
+			}
+		}
+	}
+
+	if (@full_matches > 1)
 	{
-		die "$fname not found";
-	} elsif (@secrets > 1)
+		die "More than one $prefix found";
+	} elsif (@full_matches == 1)
 	{
-		die "More than one $fname found";
+		return $full_matches[0];
+	} elsif (@prefix_matches > 1)
+	{
+		die "More than one $prefix found";
+	} elsif (@prefix_matches == 1)
+	{
+		return $prefix_matches[0];
 	} else
 	{
-		return $secrets[0];
+		die "$prefix not found";
 	}
 }
 
