@@ -245,7 +245,7 @@ while (my (undef, $fnames) = each(%sizes))
 }
 undef %sizes;
 
-# Process @fnames in alphabetic rather than some totally alphabetic orders,
+# Process @fnames in alphabetic rather than some totally random order,
 # as files in the same directory are more likely placed together.  If we
 # didn't gather any @files, we've got nothing to do.
 @fnames = sort(keys(%fnames));

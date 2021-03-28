@@ -1,6 +1,6 @@
 #!/usr/bin/perl -w
 #
-# apt-dl.pl -- download and optionally extrace Debian packages
+# apt-dl.pl -- download and optionally extract Debian packages
 #
 # Synopsis:
 #   apt-dl.pl	[-u | -X | {-x <what-to-extract>}...]
