@@ -11,3 +11,4 @@ apt-dl.pl		download and optionally extract Debian packages
 			(obsolete, use apt-get download instead)
 phonebook.pl		look up someone in LDAP
 pwman.pl		INI and GnuPG-based command-line password manager
+debcheck.pl		verify the integrity of a manually downloaded .deb
