@@ -27,8 +27,13 @@ for my $fname (@ARGV)
 
 	# Extract the package's name and version from the file name.
 	($pkg, $ver) = split(/_/, $fname);
-	defined $ver
-		or warn "Could not parse $fname";
+	if (defined $ver)
+	{	# apt-get download may encode ':' in the version.
+		$ver =~ s/^(\d+)%3a/$1:/;
+	} else
+	{
+		warn "Could not parse $fname";
+	}
 
 	# Extract the same information from the package's control file.
 	open(DEB, "-|", ("dpkg", "-f", $fname, "Package", "Version"))
