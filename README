@@ -12,3 +12,4 @@ apt-dl.pl		download and optionally extract Debian packages
 phonebook.pl		look up someone in LDAP
 jelsaw.pl		INI and GnuPG-based command-line password manager
 debcheck.pl		verify the integrity of a manually downloaded .deb
+ungpg			transparently decrypt .gpg files while copying

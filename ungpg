@@ -1,0 +1,150 @@
+#!/bin/sh -e
+#
+# ungpg -- cp-like program that can decrypt .gpg files transparently
+#
+# This script helps you decrypt files when you can't or don't want to use
+# the keyring in the default ~/.gnupg directory.  This is handy when you
+# need to decrypt something from /mnt and the appropriate keyring is also
+# on that file system:
+#
+# $ mount /dev/ice /mnt
+# $ ls /mnt/root
+# .gnupg keys
+# $ ungpg /mnt/root/keys/secret.gpg .
+#
+# First the program searches for the GnuPG home directory in the directory
+# hierarchies of the source files as well as that of the the destination
+# directory and the current working directory.  Then it starts up a temporary
+# gpg-agent pointed at the discovered home directory, invokes gpg --decrypt
+# in a subshell, and turns down the agent when it's finished.  It is an error
+# if gpg-agent was already running in that home directory.
+
+if [ $# -lt 2 ];
+then
+	echo "Usage: $0 {<.gpg>|<non-.gpg>} ... <dst>" >&2;
+	exit 1;
+fi
+
+# Remove the last positional argument and set it to $dst ($dst = pop(@ARGV)).
+argc=$#;
+for arg;
+do
+	if [ $# -eq $argc ];
+	then
+		set -- "$arg";
+	elif [ $# -lt $((argc - 1)) ];
+	then
+		set -- "$@" "$arg";
+	else
+		dst="$arg";
+	fi
+done
+
+# Verify that $dst doesn't exist or is a directory.
+if [ ! -e "$dst" ];
+then
+	if [ $# -gt 1 ];
+	then	# We have multiple sources, $dst must be a directory.
+		echo "$0: $dst: no such file or directory" >&2;
+		exit 1;
+	fi
+elif [ ! -d "$dst" ];
+then
+	echo "$0: $dst exists" >&2;
+	exit 1;
+fi
+
+# Verify that the sources exist and wouldn't overwrite anything in $dst.
+for src;
+do
+	if [ ! -e "$src" ];
+	then
+		echo "$0: $src: no such file or directory" >&2;
+		exit 1;
+	elif [ ! -f "$src" ];
+	then
+		echo "$0: $src: not a regular file" >&2;
+		exit 1;
+	elif [ -d "$dst" ];
+	then
+		out=`basename "$src"`;
+		out="$dst/${out%.gpg}";
+		if [ -e "$out" ];
+		then
+			echo "$0: $out exists" >&2;
+			exit 1;
+		fi
+	fi
+done
+
+# Find $GNUPGHOME unless it's set explicitly.
+if [ "$GNUPGHOME" = "" ];
+then	# Search in these directory hierarchies.
+	for dir in "$@" "$dst" "$PWD";
+	do
+		[ -d "$dir" ] \
+			|| dir=`dirname "$dir"`;
+		dir=`realpath "$dir"`;
+
+		# Look for .gnupg in $dir and upwards.
+		while :;
+		do
+			if [ -d "$dir/.gnupg" ];
+			then
+				export GNUPGHOME="$dir/.gnupg";
+				break;
+			elif [ "$home" = "/" ];
+			then
+				break;
+			else
+				dir=`dirname "$dir"`;
+			fi
+		done
+
+		# Break if we've found it.
+		[ "$GNUPGHOME" = "" ] \
+			|| break;
+	done
+
+	if [ "$GNUPGHOME" = "" ];
+	then
+		echo "$0: couldn't find the .gnupg home directory" >&2;
+		exit 1;
+	fi
+fi
+
+# The directory in var is needed for GnuPG's IPC if $GNUPGHOME isn't writable.
+umask 077;
+mkdir -p "/var/run/user/`id -u`" 2> /dev/null \
+	|| true;
+
+# Does the built-in printf support %q to auto-quote arguments?
+if printf "%q" "" > /dev/null 2>&1;
+then	# It's accepted.
+	printf="printf";
+else	# Use coreutils'.
+	printf="env printf";
+fi
+
+# Start gpg-agent and decrypt or copy the source files to $dst.
+for src;
+do
+	if [ "${src%.gpg}" != "$src" ];
+	then	# We have a *.gpg.
+		if [ -d "$dst" ];
+		then
+			out=`basename "$src"`;
+			out="$dst/${out%.gpg}";
+		else
+			out="$dst";
+		fi
+
+		# Disable locking in case $GNUPGHOME is read-only.
+		$printf "gpg --lock-never --decrypt -o %q %q\n" \
+				"$out" "$src";
+	else	# %q makes the command whitespace-safe.
+		$printf "cp %q %q\n" "$src" "$dst";
+	fi
+done | gpg-agent --daemon -- sh -e;
+
+# End of ungpg
