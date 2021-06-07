@@ -1,13 +1,13 @@
 /*
  * unbuffer.c -- execute a program and make its output unbuffered
  *
- * You know the situration: some program print diagnostic information
+ * You know the situation: some program print diagnostic information
  * and you want to save it to a file.  As you know stdout becomes
  * buffered if it's not connected to a terminal, and interrupting
  * the program doesn't flush it automatically either.
  *
  * `unbuffer' starts the given program, makes it believe it talks
- * to the terminal (making its stdout unbuffered) and the forward
+ * to the terminal (making its stdout unbuffered) and then forward
  * its output to stdout unbuffered.  If you redirect `unbuffer's
  * stdout, you'll get instant unbuffered output.  stdin is also
  * forwarded to the child program.
