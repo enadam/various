@@ -1,6 +1,6 @@
 #!/usr/bin/perl -w
 #
-# pwman.pl -- simple password manager
+# jelsaw.pl -- simple password manager
 #
 # Take a gpg-encrypted INI-file from @VAULTS and copy one of its secrets
 # (a password for example) to the primary X selection, from which you
@@ -10,37 +10,37 @@
 # GnuPG and xsel(1) must be installed.
 #
 # Usage: <<<
-# pwman.pl [--timeout|-t <seconds>] <vault> [[<section>/]<key>]
+# jelsaw.pl [--timeout|-t <seconds>] <vault> [[<section>/]<key>]
 #   Copy the secret value of <key> ("password" by default) from one of the
 #   <vault>'s <section>s (the "default" one if unspecified).  <vault> is
 #   the case-insensitive prefix of an INI-file's name under @VAULTS which
-#   contains the secrets (~/.config/pwman hardwired).  You have <seconds>
+#   contains the secrets (~/.config/jelsaw hardwired).  You have <seconds>
 #   time (5 by default) to paste the secret value.  After that the program
 #   exits and the secret is deleted from the selection.  -t 0 disables the
 #   timeout.  This case press <Enter> to quit when you're finished.
 #
-# pwman.pl --find|-f <vault>
+# jelsaw.pl --find|-f <vault>
 #   Return the vault that woule be opened.
 #
-# pwman.pl --edit|-w <vault>
+# jelsaw.pl --edit|-w <vault>
 #   Edit the <vault> with your $VISUAL editor.
 #
-# pwman.pl --all|-a <vault>
+# jelsaw.pl --all|-a <vault>
 #   Show the <vault> as-is in plaintext.
 #
-# pwman.pl --view|-v <section> <vault>
+# jelsaw.pl --view|-v <section> <vault>
 #   Show <section>'s all keys and secret values.
 #
-# pwman.pl --view|-v [<section>/]<key> <vault>
+# jelsaw.pl --view|-v [<section>/]<key> <vault>
 #   Show the specified <key>'s secret value.
 #
-# pwman.pl --copy|-c [<section>/]<key> [--timeout|-t <seconds>] <vault>
+# jelsaw.pl --copy|-c [<section>/]<key> [--timeout|-t <seconds>] <vault>
 #   Copy the specified <key>'s secret value.
 #
-# pwman.pl --overview|-l <vault>
+# jelsaw.pl --overview|-l <vault>
 #   Show the sections and keys in the <vault>, but not the secret values.
 #
-# pwman.pl --interactive|-i <vault>
+# jelsaw.pl --interactive|-i <vault>
 #   Open the <vault> then prompt for your commands to see or copy secrets.
 #   Enter '?' to see the options.
 # >>>
@@ -61,24 +61,24 @@
 #
 # Examples:
 #
-# $ pwman.pl shops
+# $ jelsaw.pl shops
 #   Copies "hihihi" from the default section.
 #
-# $ pwman.pl shops username
+# $ jelsaw.pl shops username
 #   Copies "me@mine.org".
 #
-# $ pwman.pl shops site1/answer
+# $ jelsaw.pl shops site1/answer
 #   Copies "Dunno".
 #
-# $ pwman.pl shops -v username
+# $ jelsaw.pl shops -v username
 #   Prints "me@mine.org".
 #
-# $ pwman.pl shops -v site1
+# $ jelsaw.pl shops -v site1
 #   Prints:
 # security question = Who are you?
 # answer            = Dunno
 #
-# $ pwman.pl shops -l
+# $ jelsaw.pl shops -l
 #   Prints:
 # username
 # password
@@ -99,7 +99,7 @@ use Getopt::Long;
 use Config::IniFiles;
 
 # Constants
-my @VAULTS = ("$ENV{'HOME'}/.config/pwman");
+my @VAULTS = ("$ENV{'HOME'}/.config/jelsaw");
 my @GPG = qw(gpg --batch --quiet --decrypt --);
 my @XSEL = qw(xsel --input --logfile /dev/null --nodetach);
 
@@ -514,4 +514,4 @@ if ($opt_overview)
 }
 
 # vim: set foldmethod=marker foldmarker=<<<,>>>:
-# End of pwman.pl
+# End of jelsaw.pl
