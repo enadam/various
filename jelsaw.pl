@@ -52,9 +52,9 @@
 # password = hihihi
 #
 # [site1]
-# password = hahaha
+# password = ha#ha#ha # This is a comment.
 # security question = Who are you?
-# answer = Dunno
+# answer = Dunno \# Last time I knew.
 #
 # [site2]
 # security question = What do you want?
@@ -69,10 +69,10 @@
 #   Copies "me@mine.org".
 #
 # $ jelsaw.pl shops site1/
-#   Copies "hahaha".
+#   Copies "ha#ha#ha".
 #
 # $ jelsaw.pl shops site1/answer
-#   Copies "Dunno".
+#   Copies "Dunno # Last time I knew.".
 #
 # $ jelsaw.pl shops -v username
 #   Prints "me@mine.org".
