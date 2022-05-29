@@ -377,7 +377,7 @@ if ($opt_overview)
 	require Term::ReadLine;
 	my ($term, @completions);
 
-	$term = Term::ReadLine->new('getpw');
+	$term = Term::ReadLine->new('jelsaw');
 	$term->ornaments(0);
 
 	# Set up tab-completion of sections and keys.
