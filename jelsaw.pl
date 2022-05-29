@@ -1,13 +1,17 @@
 #!/usr/bin/perl -w
 #
-# jelsaw.pl -- simple password manager
+# jelsaw.pl -- simple password manager with OAuth 2.0 support
 #
 # Take a gpg-encrypted INI-file from @VAULTS and copy one of its secrets
 # (a password for example) to the primary X selection, from which you
 # can paste it in another window with the middle button of the mouse.
 #
 # To run the Config::IniFiles perl module (libconfig-inifiles-perl in Debian),
-# GnuPG and xsel(1) must be installed.
+# GnuPG and xsel(1) must be installed.  If the clipboard is not used, the
+# program doesn't have to run in X.
+#
+# The interactive mode needs Term::ReadLine, and the OAuth functionality
+# deoends on LWP.
 #
 # Usage: <<<
 # jelsaw.pl [--timeout|-t <seconds>] <vault> [<section>/][<key>]
@@ -36,6 +40,11 @@
 #
 # jelsaw.pl --copy|-c [<section>/][<key>] [--timeout|-t <seconds>] <vault>
 #   Copy the specified <key>'s secret value.
+#   Same as jelsaw.pl <vault> [<section>/][<key>].
+#
+# jelsaw.pl --oauth2 --view|--copy [<section>/][refresh|access] <vault>
+#   Obtain a refresh or access token from an OAuth 2.0 provider and print it
+#   or copy it to the clipboard.  See below for details.
 #
 # jelsaw.pl --overview|-l <vault>
 #   Show the sections and keys in the <vault>, but not the secret values.
@@ -100,6 +109,43 @@
 # security question
 # answer
 # >>>
+#
+# OAuth 2.0 support <<<
+# ---------------------
+#
+# If the necessary keys are present in a section, jelsaw can obtain a refresh
+# or access token from an OAuth provider (inspired by
+# https://github.com/google/gmail-oauth2-tools/blob/master/python/oauth2.py).
+# An access token can be used for IMAP or SMTP authentication for example.
+#
+# Suppose you have these in your vault:
+#
+# [gmail]
+# oauth2_provider	= https://accounts.google.com
+# oauth2_scope		= https://mail.google.com/
+#			# Only needed for refresh token generation.
+# oauth2_client_id	= ...
+# oauth2_client_secret	= ...
+# oauth2_refresh_token	= ...	# Needed for access token generation.
+#
+# $ jelsaw.pl --oauth2 <vault> gmail/access
+#
+# Will go to the oauth2_provider and exchange oauth2_refresh_token for a
+# short-lived access token.  "access" can be omitted, as that's the default.
+# If the settings are in the default section, you can omit the argument
+# altogether.
+#
+# $ jelsaw.pl --oauth2 <vault> gmail/refresh
+#
+# Prints an URL for you to follow.  Once your OAuth provider has authenticated
+# you and confirmed the access request, it will return an authentication code,
+# which you need to enter this program.  Then jelsaw will exchange this code
+# for a refresh token and copy it to the clipboard.  From there you can add it
+# to the vault.
+#
+# See this guide how to set up an oauth2_client_id and secret:
+# https://gitlab.com/muttmua/mutt/-/blob/master/contrib/mutt_oauth2.py.README
+# >>>
 
 # Modules
 use strict;
@@ -111,6 +157,7 @@ use Config::IniFiles;
 my @VAULTS = ("$ENV{'HOME'}/.config/jelsaw");
 my @GPG = qw(gpg --batch --quiet --decrypt --);
 my @XSEL = qw(xsel --input --logfile /dev/null --nodetach);
+my $OAUTH2_REDIR = "urn:ietf:wg:oauth:2.0:oob";
 
 # Private variables
 my $Opt_timeout;
@@ -404,9 +451,114 @@ sub unescape
 	return $str;
 }
 
+# Import all the modules required for the oauth2_*() functions.
+# Since this functioanality is optional, we import them on demand.
+sub init_oauth2
+{
+	require URI;
+	require LWP::UserAgent;
+	require HTTP::Request::Common;
+	require JSON::PP;
+}
+
+# Acquire a new refresh_token from an OAuth provider.
+sub oauth2_new_refresh_token
+{
+	my ($ini, $section, $cmd) = @_;
+	my ($provider, $client_id, $client_secret, $scope, $auth_code);
+	my ($url, $http_reply, $json);
+
+	$provider	= retrieve_key($ini, $section, "oauth2_provider");
+	$client_id	= retrieve_key($ini, $section, "oauth2_client_id");
+	$client_secret	= retrieve_key($ini, $section, "oauth2_client_secret");
+	$scope		= retrieve_key($ini, $section, "oauth2_scope");
+
+	# First send the user to get the $auth_code from the $provider.
+	$url = URI->new("$provider/o/oauth2/auth");
+	$url->query_form(
+		client_id	=> $client_id,
+		scope		=> $scope,
+		response_type	=> "code",
+		redirect_uri	=> $OAUTH2_REDIR);
+
+	print $url->as_string();
+	do
+	{
+		local $\ = "";
+		print "Visit the URL above and enter the authorization code: ";
+	};
+	defined ($auth_code = readline(*STDIN))
+		or die "Cancelled.";
+	chomp($auth_code);
+
+	# Exchange the $auth_code for a refresh_token.
+	$http_reply = LWP::UserAgent->new()->request(
+		HTTP::Request::Common::POST("$provider/o/oauth2/token",
+		[
+			client_id	=> $client_id,
+			client_secret	=> $client_secret,
+			code		=> $auth_code,
+			grant_type	=> "authorization_code",
+			redirect_uri	=> $OAUTH2_REDIR,
+		]));
+	$http_reply->is_success()
+		or die "$provider: ", $http_reply->status_line();
+
+	$json = JSON::PP::decode_json($http_reply->content());
+	defined $$json{"refresh_token"}
+		or die "$provider: 'refresh_token' missing";
+
+	if ($cmd eq "view")
+	{	# If the access_token is missing, that's odd, but not a
+		# fatal error.
+		print "Refresh token: ", $$json{"refresh_token"};
+		print "Access token:  ", $$json{"access_token"}
+			if defined $$json{"access_token"};
+	} else
+	{
+		copy_to_clipboard($$json{"refresh_token"});
+	}
+}
+
+# Acquire a new access_token from a refresh_token.
+sub oauth2_refresh_access_token
+{
+	my ($ini, $section, $cmd) = @_;
+	my ($provider, $client_id, $client_secret, $refresh_token);
+	my ($http_reply, $json);
+
+	$provider	= retrieve_key($ini, $section, "oauth2_provider");
+	$client_id	= retrieve_key($ini, $section, "oauth2_client_id");
+	$client_secret	= retrieve_key($ini, $section, "oauth2_client_secret");
+	$refresh_token	= retrieve_key($ini, $section, "oauth2_refresh_token");
+
+	$http_reply = LWP::UserAgent->new()->request(
+		HTTP::Request::Common::POST("$provider/o/oauth2/token",
+		[
+			client_id	=> $client_id,
+			client_secret	=> $client_secret,
+			refresh_token	=> $refresh_token,
+			grant_type	=> "refresh_token",
+		]));
+	$http_reply->is_success()
+		or die "$provider: ", $http_reply->status_line();
+
+	$json = JSON::PP::decode_json($http_reply->content());
+	defined $$json{"access_token"}
+		or die "$provider: 'access_token' missing";
+
+	if ($cmd eq "view")
+	{
+		print $$json{"access_token"};
+	} else
+	{
+		copy_to_clipboard($$json{"access_token"});
+	}
+}
+
 # Main starts here.
-my ($opt_find, $opt_edit, $opt_view_all, $opt_view, $opt_copy);
-my ($opt_overview, $opt_interactive);
+my ($opt_find, $opt_edit, $opt_view_all, $opt_overview, $opt_interactive);
+my ($opt_view, $opt_copy, $opt_oauth2);
 my (@modes, $vault, $ini);
 
 $\ = "\n";
@@ -426,9 +578,11 @@ exit(1) unless GetOptions(
 	'a|all'		=> \$opt_view_all,
 	'v|view=s'	=> \$opt_view,
 	'c|copy=s'	=> \$opt_copy,
+	'A|oauth2'	=> \$opt_oauth2,
 	't|timeout=i'	=> \$Opt_timeout,
 	'l|overview'	=> \$opt_overview,
-	'i|interactive'	=> \$opt_interactive);
+	'i|interactive'	=> \$opt_interactive,
+);
 
 # Find the $vault to read the secrets from.
 @ARGV > 0
@@ -450,6 +604,14 @@ if (@ARGV)
 } elsif (@modes > 1)
 {	# More than one mode is selected.
 	usage();
+}
+
+if ($opt_oauth2)
+{
+	init_oauth2();
+	defined $opt_view || defined $opt_copy
+		or die "--oauth2 only makes sense with the view or copy ",
+			"command";
 }
 
 if ($opt_find)
@@ -475,7 +637,7 @@ if ($opt_overview)
 {	# Let the user pick what to view or copy interactively.
 	# Only load readline-support in interactive mode.
 	require Term::ReadLine;
-	my ($term, @completions);
+	my ($term, @completions, @commands);
 
 	$term = Term::ReadLine->new('jelsaw');
 	$term->ornaments(0);
@@ -484,11 +646,15 @@ if ($opt_overview)
 	@completions = extract_completions($ini);
 
 	# The first word can be a command.
+	@commands = qw(
+		edit reveal view copy
+		gen-oauth2-refresh-token gen-and-copy-oauth2-refresh-token
+		gen-oauth2-access-token gen-and-copy-oauth2-access-token);
 	$term->Attribs->{'completion_function'} = sub
 	{
 		my ($text, $line, $start) = @_;
 		substr($line, 0, $start) =~ /^\s*$/
-			? (@completions, qw(edit reveal view copy))
+			? (@completions, @commands)
 			: @completions;
 	};
 
@@ -540,7 +706,7 @@ if ($opt_overview)
 			{
 				return 0;
 			} elsif ($what eq "help" || $what eq '?')
-			{
+			{	# <<<
 				print "help, ?                  - ",
 					"???";
 				print "exit, q, ^D              - ",
@@ -564,6 +730,24 @@ if ($opt_overview)
 				print "copy [<section>/]        - ",
 					"copy <section>/password or ",
 					"default/password";
+				print "";
+				print "gen-oauth2-refresh-token          ",
+					"[<section>]";
+				print "    Acquire and print a new refresh ",
+					"token from an OAuth provider.";
+				print "gen-oauth2-access-token           ",
+					"[<section>]";
+				print "    Acquire and print a new access ",
+					"token.";
+				print "gen-and-copy-oauth2-refresh-token ",
+					"[<section>]";
+				print "    Acquire a new refresh token and ",
+					"copy it to the clipboard.";
+				print "gen-and-copy-oauth2-access-token  ",
+					"[<section>]";
+				print "    Acquire a new access token and ",
+					"copy it to the clipboard.";
+				# >>>
 			} elsif ($what eq "")
 			{
 				overview_cmd($ini);
@@ -583,6 +767,15 @@ if ($opt_overview)
 			{
 				local $\ = "";
 				$ini->OutputConfig();
+			} elsif ($what =~ s/^gen(-and-copy)?-oauth2
+						-(refresh|access)-token\s*//x)
+			{
+				my $cmd = defined $1 ? "copy" : "view";
+				my $fun = $2 eq "refresh"
+					? \&oauth2_new_refresh_token
+					: \&oauth2_refresh_access_token;
+				init_oauth2();
+				$fun->($ini, $what || "default", $cmd);
 			} elsif ($what =~ s/^view\s*//)
 			{
 				view_cmd($ini, unescape($what));
@@ -601,6 +794,23 @@ if ($opt_overview)
 		{
 			last;
 		}
+	}
+} elsif ($opt_oauth2)
+{
+	my ($cmd, $section, $key);
+
+	$cmd = defined $opt_view ? "view" : "copy";
+	($section, $key) = parse_section_and_key(
+		$opt_view || $opt_copy, "access_token");
+	if ($key eq "refresh" || $key eq "refresh_token")
+	{
+		oauth2_new_refresh_token($ini, $section, $cmd);
+	} elsif ($key eq "access" || $key eq "access_token")
+	{
+		oauth2_refresh_access_token($ini, $section, $cmd);
+	} else
+	{
+		die "$key: should be either \"refresh\" or \"access\"";
 	}
 } elsif (defined $opt_view)
 {
