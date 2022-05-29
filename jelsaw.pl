@@ -16,8 +16,8 @@
 #   the case-insensitive prefix of an INI-file's name under @VAULTS which
 #   contains the secrets (~/.config/jelsaw hardwired).  You have <seconds>
 #   time (5 by default) to paste the secret value.  After that the program
-#   exits and the secret is deleted from the selection.  -t 0 disables the
-#   timeout.  This case press <Enter> to quit when you're finished.
+#   exits and the secret is deleted from the selection.  To finish earlier,
+#   press <Enter>.  -t 0 disables the timeout.
 #
 # jelsaw.pl --find|-f <vault>
 #   Return the vault that woule be opened.
@@ -47,7 +47,7 @@
 #
 # A <vault> file (for example "shops.gpg") could be: <<<
 #
-# # This is the default <section>.
+# # This is the default section.
 # username = me@mine.org
 # password = hihihi
 #
@@ -481,7 +481,7 @@ if ($opt_overview)
 			{
 				print "help, ?                  - ",
 					"???";
-				print "exit, q                  - ",
+				print "exit, q, ^D              - ",
 					"I'm done";
 				print "!!                       - ",
 					"do it again";
