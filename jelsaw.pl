@@ -202,6 +202,55 @@ sub find_vault
 	}
 }
 
+# Decrypt the contents of $vault and parse it as an INI.
+sub load_vault
+{
+	my $vault = shift;
+	my $ini;
+
+	open(GPG, '-|', @GPG, $vault)
+		or die "$GPG[0]: $!";
+	$ini = Config::IniFiles->new(-file => \*GPG, -fallback => "default");
+	close(GPG) # Wait until @GPG finishes to see if there was an error.
+		or exit($? >> 8);
+	if (!defined $ini)
+	{	# Syntax error in the $vault.
+		local $, = "\n";
+		print STDERR "$vault";
+		print STDERR @Config::IniFiles::errors;
+		return undef;
+	} else
+	{
+		return $ini;
+	}
+}
+
+# Extract the sections and keys from $ini for the purpose of
+# tab-completion.
+sub extract_completions
+{
+	my $ini = shift;
+	my @completions;
+
+	for my $section ($ini->Sections())
+	{
+		push(@completions, $section);
+		foreach my $key ($ini->Parameters($section))
+		{
+			push(@completions, $key)
+				if $section eq "default";
+			push(@completions, "$section/$key")
+		}
+	}
+
+	# Escape \-es and spaces to make tab-completion work on words
+	# containing escaped spaces and backslashes.
+	s/( |\\)/\\$1/g
+		for @completions;
+
+	return @completions;
+}
+
 # Print $ini's sections and keys.
 sub overview
 {
@@ -352,19 +401,8 @@ if ($opt_find)
 {	# Show the whole $vault in cleartext?
 	exec(@GPG, $vault)
 		or die "$GPG[0]: $!";
-}
-
-# Decrypt and read the contents of $vault into $ini.
-open(GPG, '-|', @GPG, $vault)
-	or die "$GPG[0]: $!";
-$ini = Config::IniFiles->new(-file => \*GPG, -fallback => "default");
-close(GPG) # Wait until @GPG finishes to see if there was an error.
-	or exit($? >> 8);
-if (!defined $ini)
-{	# Syntax error in the $vault.
-	$, = "\n";
-	print STDERR "$vault";
-	print STDERR @Config::IniFiles::errors;
+} elsif (!defined ($ini = load_vault($vault)))
+{
 	exit 1;
 }
 
@@ -381,21 +419,7 @@ if ($opt_overview)
 	$term->ornaments(0);
 
 	# Set up tab-completion of sections and keys.
-	for my $section ($ini->Sections())
-	{
-		push(@completions, $section);
-		foreach my $key ($ini->Parameters($section))
-		{
-			push(@completions, $key)
-				if $section eq "default";
-			push(@completions, "$section/$key")
-		}
-	}
-
-	# Escape \-es and spaces to make tab-completion work on words
-	# containing escaped spaces and backslashes.
-	s/( |\\)/\\$1/g
-		for @completions;
+	@completions = extract_completions($ini);
 
 	# The first word can be a command.
 	$term->Attribs->{'completion_function'} = sub
@@ -462,7 +486,7 @@ if ($opt_overview)
 				print "!!                       - ",
 					"do it again";
 				print "edit                     - ",
-					"edit the vault file";
+					"edit the vault file and reload it";
 				print "<Enter>                  - ",
 					"see an overview of the vault";
 				print "reveal                   - ",
@@ -479,7 +503,16 @@ if ($opt_overview)
 				overview($ini);
 			} elsif ($what eq "edit")
 			{
-				system($ENV{'VISUAL'}, $vault);
+				my $new;
+
+				# If the edition was successful, reload $ini.
+				if (system($ENV{'VISUAL'}, $vault) == 0
+					&& defined ($new = load_vault($vault)))
+				{
+					$ini = $new;
+					@completions =
+						extract_completions($ini);
+				}
 			} elsif ($what eq "reveal")
 			{
 				local $\ = "";
