@@ -10,7 +10,7 @@
 # GnuPG and xsel(1) must be installed.
 #
 # Usage: <<<
-# jelsaw.pl [--timeout|-t <seconds>] <vault> [[<section>/]<key>]
+# jelsaw.pl [--timeout|-t <seconds>] <vault> [<section>/][<key>]
 #   Copy the secret value of <key> ("password" by default) from one of the
 #   <vault>'s <section>s (the "default" one if unspecified).  <vault> is
 #   the case-insensitive prefix of an INI-file's name under @VAULTS which
@@ -28,13 +28,13 @@
 # jelsaw.pl --all|-a <vault>
 #   Show the <vault> as-is in plaintext.
 #
-# jelsaw.pl --view|-v <section> <vault>
+# jelsaw.pl --view|-v [<section>]/ <vault>
 #   Show <section>'s all keys and secret values.
 #
 # jelsaw.pl --view|-v [<section>/]<key> <vault>
 #   Show the specified <key>'s secret value.
 #
-# jelsaw.pl --copy|-c [<section>/]<key> [--timeout|-t <seconds>] <vault>
+# jelsaw.pl --copy|-c [<section>/][<key>] [--timeout|-t <seconds>] <vault>
 #   Copy the specified <key>'s secret value.
 #
 # jelsaw.pl --overview|-l <vault>
@@ -52,6 +52,7 @@
 # password = hihihi
 #
 # [site1]
+# password = hahaha
 # security question = Who are you?
 # answer = Dunno
 #
@@ -67,13 +68,21 @@
 # $ jelsaw.pl shops username
 #   Copies "me@mine.org".
 #
+# $ jelsaw.pl shops site1/
+#   Copies "hahaha".
+#
 # $ jelsaw.pl shops site1/answer
 #   Copies "Dunno".
 #
 # $ jelsaw.pl shops -v username
 #   Prints "me@mine.org".
 #
-# $ jelsaw.pl shops -v site1
+# $ jelsaw.pl shops -v /
+#   Prints:
+# username = me@mine.org
+# password = hihihi
+#
+# $ jelsaw.pl shops -v site1/
 #   Prints:
 # security question = Who are you?
 # answer            = Dunno
@@ -131,13 +140,13 @@ sub usage
       	print $fh "See $0 for the complete documentation.";
 	print $fh "";
 	print $fh "Usage:";
-	print $fh "  $me <vault> [[<section>/]<key>]";
+	print $fh "  $me <vault> [[<section>]/][<key>]";
 	print $fh "  $me --find|-f <vault>";
 	print $fh "  $me --edit|-w <vault>";
 	print $fh "  $me --all|-a <vault>";
-	print $fh "  $me --view|-v <section> <vault>";
-	print $fh "  $me --view|-v [<section>/]<key> <vault>";
-	print $fh "  $me --copy|-c [<section>/]<key> ",
+	print $fh "  $me --view|-v|--copy|-c [<section>]/ <vault>";
+	print $fh "  $me --view|-v|--copy|-c [[<section>]/]<key> <vault>";
+	print $fh "  $me --copy|-c <section-and/or-key> ",
 			"[--timeout|-t <seconds>] <vault>";
 	print $fh "  $me --overview|-l <vault>";
 	print $fh "  $me --interactive|-i <vault>";
@@ -264,33 +273,56 @@ sub overview
 	}
 }
 
+# Parse a command parameter as "section/key".
+sub parse_section_and_key
+{
+	my ($which, $dflt_key) = @_;
+	my ($section, $key);
+
+	if (ref $which)
+	{	# Already decomposed.
+		($section, $key) = @$which;
+	} elsif ($which =~ m!^(.*)/(.*)$!)
+	{	# $which is "$section/$key", but either of them can be empty.
+		($section, $key) = ($1, $2);
+	} else
+	{
+		$key = $which;
+	}
+
+	# Empty value -> default.
+	return ($section || undef, $key || $dflt_key);
+}
+
 sub view_or_copy
 {
 	my ($ini, $what, $which) = @_;
 	my ($section, $key, $val);
 
 	# $which -> $section, $key
-	if (ref $which)
-	{	# Already decomposed.
-		($section, $key) = @$which;
-	} elsif ($which =~ m!^(.*)/(.*)$!)
-	{	# $which is "$section/$key"
-		($section, $key) = ($1, $2);
-	} elsif ($what eq "view" && $ini->SectionExists($which))
-	{	# Show the whole $section.
-		my @keys = $ini->Parameters($section = $which);
-		my $maxwidth;
+	($section, $key) = parse_section_and_key(
+		$which, $what eq "copy" ? "password" : undef);
+	defined $section
+		or $section = "default";
+
+	# Show the whole $section?  (Only valid for viewing.)
+	if (!defined $key)
+	{
+		my (@keys, $maxwidth);
+
+		$what eq "view"
+			or die;
+		$ini->SectionExists($section)
+			or die "$section: no such section";
 
 		# Align the key values.
+		@keys = $ini->Parameters($section);
 		defined $maxwidth && $maxwidth > length($_)
 				or $maxwidth = length($_)
 			foreach @keys;
 		printf("%-*s = %s\n", $maxwidth, $_, $ini->val($section, $_))
 			foreach @keys;
 		return;
-	} else
-	{	# Take $key from the default section.
-		($section, $key) = ("default", $which);
 	}
 
 	if (!defined ($val = $ini->val($section, $key)))
@@ -383,8 +415,8 @@ if (@ARGV)
 	usage() if @ARGV > 1;
 	$opt_copy = shift;
 } elsif (!@modes)
-{	# Copy default/password by default.
-	$opt_copy = [ "default", "password" ];
+{	# Copy the default password by default.
+	$opt_copy = [ ];
 } elsif (@modes > 1)
 {	# More than one mode is selected.
 	usage();
@@ -491,13 +523,17 @@ if ($opt_overview)
 					"see an overview of the vault";
 				print "reveal                   - ",
 					"show the entire vault";
-				print "view <section>           - ",
-					"view the selected <section>";
+				print "view [<section>/]        - ",
+					"view the selected <section> ",
+					"or the default one";
 				print "view [<section>/]<key>   - ",
 					"view the selected <key>";
 				print "[copy] [<section>/]<key> - ",
 					"copy the selected <key> ",
 					"to clipboard";
+				print "copy [<section>/]        - ",
+					"copy <section>/password or ",
+					"default/password";
 			} elsif ($what eq "")
 			{
 				overview($ini);
@@ -517,13 +553,13 @@ if ($opt_overview)
 			{
 				local $\ = "";
 				$ini->OutputConfig();
-			} elsif ($what =~ s/^view\s+//)
+			} elsif ($what =~ s/^view\s*//)
 			{
 				$what =~ s/\\( |\\)/$1/g;
 				view_or_copy($ini, "view", $what);
 			} else
 			{
-				$what =~ s/^copy\s+//;
+				$what =~ s/^copy\s*//;
 				$what =~ s/\\( |\\)/$1/g;
 				view_or_copy($ini, "copy", $what);
 			}
