@@ -261,7 +261,7 @@ sub extract_completions
 }
 
 # Print $ini's sections and keys.
-sub overview
+sub overview_cmd
 {
 	my $ini = shift;
 
@@ -291,29 +291,40 @@ sub parse_section_and_key
 	}
 
 	# Empty value -> default.
-	return ($section || undef, $key || $dflt_key);
+	return ($section || "default", $key || $dflt_key);
 }
 
-sub view_or_copy
+# Return the value of $section/$key in $ini.
+sub retrieve_key
 {
-	my ($ini, $what, $which) = @_;
-	my ($section, $key, $val);
+	my ($ini, $section, $key) = @_;
+	my $val;
 
-	# $which -> $section, $key
-	($section, $key) = parse_section_and_key(
-		$which, $what eq "copy" ? "password" : undef);
-	defined $section
-		or $section = "default";
-
-	# Show the whole $section?  (Only valid for viewing.)
-	if (!defined $key)
+	if (!defined ($val = $ini->val($section, $key)))
 	{
-		my (@keys, $maxwidth);
+		die "$section/$key: no such key";
+	} else
+	{
+		return $val;
+	}
+}
 
-		$what eq "view"
-			or die;
-		$ini->SectionExists($section)
-			or die "$section: no such section";
+# Print a key's value or an entire section of $ini.
+sub view_cmd
+{
+	my ($ini, $what) = @_;
+	my ($section, $key);
+
+	($section, $key) = parse_section_and_key($what);
+	if (defined $key)
+	{
+		print retrieve_key($ini, $section, $key);
+	} elsif (!$ini->SectionExists($section))
+	{
+		die "$section: no such section";
+	} else
+	{	# Show the whole $section.
+		my (@keys, $maxwidth);
 
 		# Align the key values.
 		@keys = $ini->Parameters($section);
@@ -322,56 +333,75 @@ sub view_or_copy
 			foreach @keys;
 		printf("%-*s = %s\n", $maxwidth, $_, $ini->val($section, $_))
 			foreach @keys;
-		return;
+	}
+}
+
+# Delete trailing comment from a key's value.
+sub uncomment
+{
+	my $str = shift;
+
+	$str =~ s/\s+#\s+.*$//;
+	$str =~ s/\\#/#/g;
+
+	return $str;
+}
+
+# Pass $str to xsel(1) to copy it to the clipboard.
+sub copy_to_clipboard
+{
+	use POSIX;
+	my $str = shift;
+	my $xsel;
+	local *XSEL;
+
+	# X might be running on another virtual console.
+	exists $ENV{'DISPLAY'}
+		or $ENV{'DISPLAY'} = ":0";
+	defined ($xsel = open(XSEL, "|-", @XSEL))
+		or die "$XSEL[0]: $!";
+
+	# $xsel reads STDIN until EOF, so we must close the input pipe.
+	# We can't just close() it because that waits until $xsel exits.
+	select(XSEL);
+	local $\ = "";
+	local $| = 1;
+	print XSEL $str;
+	select(STDOUT);
+	POSIX::close(fileno(XSEL));
+	print "Go!\n";
+
+	if ($Opt_timeout)
+	{	# Kill $xsel in $Opt_timeout seconds.
+		$SIG{'ALRM'} = sub { die };
+		alarm($Opt_timeout);
 	}
 
-	if (!defined ($val = $ini->val($section, $key)))
+	# Kill $xsel and exit when the user hits enter.
+	eval
 	{
-		die "$section/$key: no such key";
-	} elsif ($what eq "view")
-	{	# Just show $val.
-		print $val;
-	} else
-	{	# Pass $val to xsel(1) to copy it to the clipboard.
-		use POSIX;
-		my $xsel;
-		local *XSEL;
+		local $SIG{'__DIE__'};
+		readline;
+		alarm(0);
+	};
+	kill(TERM => $xsel);
+}
 
-		# Delete trailing comment.
-		$val =~ s/\s+#\s+.*$//;
-		$val =~ s/\\#/#/g;
+# Copy a key from $ini to the clipboard.
+sub copy_cmd
+{
+	my ($ini, $what) = @_;
 
-		# X might be running on another virtual console.
-		exists $ENV{'DISPLAY'}
-			or $ENV{'DISPLAY'} = ":0";
-		defined ($xsel = open(XSEL, "|-", @XSEL))
-			or die "$XSEL[0]: $!";
+	copy_to_clipboard(uncomment(retrieve_key(
+		$ini, parse_section_and_key($what, "password"))));
+}
 
-		# $xsel reads STDIN until EOF, so we must close the input pipe.
-		# We can't just close() it because that waits until $xsel exits.
-		select(XSEL);
-		local $\ = "";
-		local $| = 1;
-		print XSEL $val;
-		select(STDOUT);
-		POSIX::close(fileno(XSEL));
-		print "Go!\n";
-
-		if ($Opt_timeout)
-		{	# Kill $xsel in $Opt_timeout seconds.
-			$SIG{'ALRM'} = sub { die };
-			alarm($Opt_timeout);
-		}
-
-		# Kill $xsel and exit when the user hits enter.
-		eval
-		{
-			local $SIG{'__DIE__'};
-			readline;
-			alarm(0);
-		};
-		kill(TERM => $xsel);
-	}
+# Unescape "\ " and "\\".
+sub unescape
+{
+	my $str = shift;
+	$str =~ s/\\( |\\)/$1/g;
+	return $str;
 }
 
 # Main starts here.
@@ -440,7 +470,7 @@ if ($opt_find)
 
 if ($opt_overview)
 {	# Just show the sections and the keys, but not the vaules.
-	overview($ini);
+	overview_cmd($ini);
 } elsif ($opt_interactive)
 {	# Let the user pick what to view or copy interactively.
 	# Only load readline-support in interactive mode.
@@ -536,7 +566,7 @@ if ($opt_overview)
 					"default/password";
 			} elsif ($what eq "")
 			{
-				overview($ini);
+				overview_cmd($ini);
 			} elsif ($what eq "edit")
 			{
 				my $new;
@@ -555,13 +585,11 @@ if ($opt_overview)
 				$ini->OutputConfig();
 			} elsif ($what =~ s/^view\s*//)
 			{
-				$what =~ s/\\( |\\)/$1/g;
-				view_or_copy($ini, "view", $what);
+				view_cmd($ini, unescape($what));
 			} else
 			{
 				$what =~ s/^copy\s*//;
-				$what =~ s/\\( |\\)/$1/g;
-				view_or_copy($ini, "copy", $what);
+				copy_cmd($ini, unescape($what));
 			}
 			return 1;
 		};
@@ -576,10 +604,10 @@ if ($opt_overview)
 	}
 } elsif (defined $opt_view)
 {
-	view_or_copy($ini, "view", $opt_view);
+	view_cmd($ini, $opt_view);
 } else
 {
-	view_or_copy($ini, "copy", $opt_copy);
+	copy_cmd($ini, $opt_copy);
 }
 
 # vim: set foldmethod=marker foldmarker=<<<,>>>:
