@@ -635,73 +635,77 @@ if ($opt_overview)
 	overview_cmd($ini);
 } elsif ($opt_interactive)
 {	# Let the user pick what to view or copy interactively.
-	# Only load readline-support in interactive mode.
-	require Term::ReadLine;
-	my ($term, @completions, @commands);
+	my ($term, @completions);
 
-	$term = Term::ReadLine->new('jelsaw');
-	$term->ornaments(0);
+	if (-t STDIN)
+	{	# Only load readline-support in interactive mode.
+		require Term::ReadLine;
 
-	# Set up tab-completion of sections and keys.
-	@completions = extract_completions($ini);
+		$term = Term::ReadLine->new('jelsaw');
+		$term->ornaments(0);
 
-	# The first word can be a command.
-	@commands = qw(
-		edit reveal view copy
-		gen-oauth2-refresh-token gen-and-copy-oauth2-refresh-token
-		gen-oauth2-access-token gen-and-copy-oauth2-access-token);
-	$term->Attribs->{'completion_function'} = sub
-	{
-		my ($text, $line, $start) = @_;
-		substr($line, 0, $start) =~ /^\s*$/
-			? (@completions, @commands)
-			: @completions;
-	};
+		# Set up tab-completion of sections and keys.
+		@completions = extract_completions($ini);
 
-	# A space is quoted if it's preceded by a \, but not \\.
-	$term->Attribs->{'char_is_quoted_p'} = sub
-	{
-		my ($line, $index) = @_;
-		return reverse(substr($line, 0, $index+1)) =~
-			/^ \\(?:\\\\)*(?!\\)/;
-	};
+		# The first word can be a command.
+		my @commands = qw(
+			edit reveal view copy
+			gen-oauth2-refresh-token
+			gen-and-copy-oauth2-refresh-token
+			gen-oauth2-access-token
+			gen-and-copy-oauth2-access-token);
+		$term->Attribs->{'completion_function'} = sub
+		{
+			my ($text, $line, $start) = @_;
+			substr($line, 0, $start) =~ /^\s*$/
+				? (@completions, @commands)
+				: @completions;
+		};
 
-	$term->Attribs->{'completer_word_break_characters'} =~ s/\\//;
-	$term->Attribs->{'completer_quote_characters'} = "\\";
+		# A space is quoted if it's preceded by a \, but not \\.
+		$term->Attribs->{'char_is_quoted_p'} = sub
+		{
+			my ($line, $index) = @_;
+			return reverse(substr($line, 0, $index+1)) =~
+				/^ \\(?:\\\\)*(?!\\)/;
+		};
+
+		$term->Attribs->{'completer_word_break_characters'} =~ s/\\//;
+		$term->Attribs->{'completer_quote_characters'} = "\\";
+	}
 
 	# The main loop.
 	for (;;)
 	{
-		my $what;
-
 		# Exit silently if the user hit ^D.
-		if (!defined ($what = $term->readline("? ")))
-		{
-			print "";
-			last;
-		}
+		my $what = defined $term ? $term->readline("? ") : <STDIN>;
+		defined $what
+			or last;
 
 		# Strip whitespace.
 		$what =~ s/^\s+//;
 		$what =~ s/\s+$//;
 
-		# Add the stripped input to the history or replace it
-		# with the previous command.
-		$term->remove_history($term->where_history())
-			if $term->Features->{'autohistory'};
-		if ($what ne "!!")
-		{
-			$term->add_history($what);
-		} elsif (!defined ($what = $term->history_get(
-						$term->where_history())))
-		{
-			print STDERR "No previous command.";
-			next;
+		if (defined $term)
+		{	# Add the stripped input to the history or replace it
+			# with the previous command.
+			$term->remove_history($term->where_history())
+				if $term->Features->{'autohistory'};
+			if ($what ne "!!")
+			{
+				$term->add_history($what);
+			} elsif (!defined ($what = $term->history_get(
+							$term->where_history())))
+			{
+				print STDERR "No previous command.";
+				next;
+			}
 		}
 
 		my $ret = eval
 		{
 			local $SIG{'__DIE__'} = undef;
+			local $| = 1 unless -t STDOUT;
 			if ($what eq "exit" || $what eq "q")
 			{
 				return 0;
