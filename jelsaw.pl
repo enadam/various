@@ -768,20 +768,23 @@ if ($opt_overview)
 				local $\ = "";
 				$ini->OutputConfig();
 			} elsif ($what =~ s/^gen(-and-copy)?-oauth2
-						-(refresh|access)-token\s*//x)
+						-(refresh|access)-token
+						(?:\s+|$)//x)
 			{
 				my $cmd = defined $1 ? "copy" : "view";
 				my $fun = $2 eq "refresh"
 					? \&oauth2_new_refresh_token
 					: \&oauth2_refresh_access_token;
 				init_oauth2();
-				$fun->($ini, $what || "default", $cmd);
-			} elsif ($what =~ s/^view\s*//)
+				$fun->($ini,
+					$what ? unescape($what) : "default",
+					$cmd);
+			} elsif ($what =~ s/^view(?:\s+|$)//)
 			{
 				view_cmd($ini, unescape($what));
 			} else
 			{
-				$what =~ s/^copy\s*//;
+				$what =~ s/^copy(?:\s+|$)//;
 				copy_cmd($ini, unescape($what));
 			}
 			return 1;
