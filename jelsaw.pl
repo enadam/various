@@ -2,9 +2,14 @@
 #
 # jelsaw.pl -- simple password manager with OAuth 2.0 support
 #
-# Take a gpg-encrypted INI-file from @VAULTS and copy one of its secrets
-# (a password for example) to the primary X selection, from which you
-# can paste it in another window with the middle button of the mouse.
+# Take a gpg-encrypted INI-file (a vault) from an arbitrary directory
+# and copy one of its secrets (a password for example) to the primary
+# X selection, from which you can paste it in another window with the
+# middle button of the mouse.
+#
+# The vaults are searched under the directory specified by $JELSAW_VAULT
+# and its subdirectories or ~/.config/jelsaw by default (you can symlink
+# it to anywhere else).
 #
 # To run the Config::IniFiles perl module (libconfig-inifiles-perl in Debian),
 # GnuPG and xsel(1) must be installed.  If the clipboard is not used, the
@@ -14,14 +19,16 @@
 # deoends on LWP.
 #
 # Usage: <<<
-# jelsaw.pl [--timeout|-t <seconds>] <vault> [<section>/][<key>]
+# jelsaw.pl [--vaults|-V <vaults>] [--timeout|-t <seconds>] <vault>
+#           [<section>/][<key>]
 #   Copy the secret value of <key> ("password" by default) from one of the
 #   <vault>'s <section>s (the "default" one if unspecified).  <vault> is
-#   the case-insensitive prefix of an INI-file's name under @VAULTS which
-#   contains the secrets (~/.config/jelsaw hardwired).  You have <seconds>
-#   time (5 by default) to paste the secret value.  After that the program
-#   exits and the secret is deleted from the selection.  To finish earlier,
-#   press <Enter>.  -t 0 disables the timeout.
+#   the case-insensitive prefix of an INI-file's name containing secrets.
+#   It is searched in <vaults> (repeat the option to specify more than one)
+#   or the locations described above.  You have <seconds> time (5 by default)
+#   to paste the secret value.  After that the program exits and the secret
+#   is deleted from the selection.  To finish earlier, press <Enter>.  -t 0
+#   disables the timeout.
 #
 # jelsaw.pl --find|-f <vault>
 #   Return the vault that woule be opened.
@@ -154,7 +161,7 @@ use Getopt::Long;
 use Config::IniFiles;
 
 # Constants
-my @VAULTS = ("$ENV{'HOME'}/.config/jelsaw");
+my @DFLT_VAULTS = ("$ENV{'HOME'}/.config/jelsaw");
 my @GPG = qw(gpg --batch --quiet --decrypt --);
 my @XSEL = qw(xsel --input --logfile /dev/null --nodetach);
 my $OAUTH2_REDIR = "urn:ietf:wg:oauth:2.0:oob";
@@ -187,7 +194,7 @@ sub usage
       	print $fh "See $0 for the complete documentation.";
 	print $fh "";
 	print $fh "Usage:";
-	print $fh "  $me <vault> [[<section>]/][<key>]";
+	print $fh "  $me [--vaults|-V <dir>] <vault> [[<section>]/][<key>]";
 	print $fh "  $me --find|-f <vault>";
 	print $fh "  $me --edit|-w <vault>";
 	print $fh "  $me --all|-a <vault>";
@@ -201,14 +208,15 @@ sub usage
 	exit($error);
 }
 
-# Find a file matching $prefix in @VAULTS and its subdirectories.
+# Find a file matching $prefix in one of the @_ directories or their
+# subdirectories.
 sub find_vault
 {
 	my $prefix = shift;
 	my ($is_absolute, @dirs);
 	my ($pattern, @prefix_matches, @full_matches);
 
-	@dirs = @VAULTS;
+	@dirs = @_;
 	$is_absolute = $prefix =~ s!^/+!!;
 	if ($is_absolute && $prefix =~ s!(.*)/+!!)
 	{	# Only search in dirname($prefix).
@@ -557,7 +565,8 @@ sub oauth2_refresh_access_token
 }
 
 # Main starts here.
-my ($opt_find, $opt_edit, $opt_view_all, $opt_overview, $opt_interactive);
+my (@opt_vaults, $opt_find);
+my ($opt_edit, $opt_view_all, $opt_overview, $opt_interactive);
 my ($opt_view, $opt_copy, $opt_oauth2);
 my (@modes, $vault, $ini);
 
@@ -573,6 +582,7 @@ $Opt_timeout = 5;
 Getopt::Long::Configure(qw(gnu_getopt));
 exit(1) unless GetOptions(
 	'h|help'	=> sub { usage(0) },
+	'V|vaults=s'	=> \@opt_vaults,
 	'f|find'	=> \$opt_find,
 	'w|edit'	=> \$opt_edit,
 	'a|all'		=> \$opt_view_all,
@@ -584,10 +594,22 @@ exit(1) unless GetOptions(
 	'i|interactive'	=> \$opt_interactive,
 );
 
+# Set @opt_vaults if it wasn't specified on the command line.
+if (!@opt_vaults)
+{
+	if (defined $ENV{'JELSAW_VAULT'})
+	{
+		@opt_vaults = ($ENV{'JELSAW_VAULT'});
+	} else
+	{
+		@opt_vaults = @DFLT_VAULTS;
+	}
+}
+
 # Find the $vault to read the secrets from.
 @ARGV > 0
 	or usage(0);
-$vault = find_vault(shift);
+$vault = find_vault(shift, @opt_vaults);
 
 @modes = grep(defined $_,
 	($opt_find, $opt_edit,
