@@ -56,9 +56,9 @@
 # jelsaw.pl --overview|-l <vault>
 #   Show the sections and keys in the <vault>, but not the secret values.
 #
-# jelsaw.pl --interactive|-i <vault>
-#   Open the <vault> then prompt for your commands to see or copy secrets.
-#   Enter '?' to see the options.
+# jelsaw.pl --interactive|-i [<vault>]
+#   If specified, open the <vault>, then prompt for your commands to see
+#   or copy secrets.  Enter '?' to see the options.
 # >>>
 #
 # A <vault> file (for example "shops.gpg") could be: <<<
@@ -203,7 +203,7 @@ sub usage
 	print $fh "  $me --copy|-c <section-and/or-key> ",
 			"[--timeout|-t <seconds>] <vault>";
 	print $fh "  $me --overview|-l <vault>";
-	print $fh "  $me --interactive|-i <vault>";
+	print $fh "  $me --interactive|-i [<vault>]";
 
 	exit($error);
 }
@@ -330,6 +330,15 @@ sub open_vault
 	}
 }
 
+# Die if $ini is not open.
+sub check_vault
+{
+	my $ini = shift;
+
+	die "No vault is open."
+		if !defined $ini;
+}
+
 # Print $ini's sections and keys.
 sub overview_cmd
 {
@@ -370,6 +379,7 @@ sub retrieve_key
 	my ($ini, $section, $key) = @_;
 	my $val;
 
+	check_vault($ini);
 	if (!defined ($val = $ini->val($section, $key)))
 	{
 		die "$section/$key: no such key";
@@ -622,9 +632,13 @@ if (!@opt_vaults)
 }
 
 # Find the $vault to read the secrets from.
-@ARGV > 0
-	or usage(0);
-$vault = find_vault(shift, @opt_vaults);
+if (@ARGV > 0)
+{
+	$vault = find_vault(shift, @opt_vaults);
+} elsif (!$opt_interactive)
+{
+	usage(0);
+}
 
 @modes = grep(defined $_,
 	($opt_find, $opt_edit,
@@ -662,7 +676,7 @@ if ($opt_find)
 {	# Show the whole $vault in cleartext?
 	exec(@GPG, $vault)
 		or die "$GPG[0]: $!";
-} elsif (!defined ($ini = load_vault($vault)))
+} elsif (defined $vault && !defined ($ini = load_vault($vault)))
 {
 	exit 1;
 }
@@ -682,7 +696,8 @@ if ($opt_overview)
 		$term->ornaments(0);
 
 		# Set up tab-completion of sections and keys.
-		extract_completions($ini, \@completions);
+		extract_completions($ini, \@completions)
+			if defined $ini;
 
 		# The first word can be a command.
 		my @commands = qw(
@@ -795,22 +810,31 @@ if ($opt_overview)
 				# >>>
 			} elsif ($what eq "")
 			{
+				check_vault($ini);
 				overview_cmd($ini);
 			} elsif ($what =~ s/^(?:re)?open(?:\s+|$)//)
 			{	# Open a new $vault or reload the current one.
-				my $new_vault = $what
-					? find_vault(unescape($what),
-							@opt_vaults)
-					: $vault;
-				open_vault($new_vault, \$ini, \@completions)
-					and $vault = $new_vault;
+				if (!$what)
+				{
+					check_vault($ini);
+					open_vault($vault, \$ini, \@completions);
+				} else
+				{
+					my $new_vault = find_vault(
+						unescape($what), @opt_vaults);
+					open_vault($new_vault, \$ini,
+							\@completions)
+						and $vault = $new_vault;
+				}
 			} elsif ($what eq "edit")
 			{	# If the edition was successful, reload $ini.
+				check_vault($ini);
 				open_vault($vault, \$ini, \@completions)
 					if system($ENV{'VISUAL'}, $vault) == 0;
 			} elsif ($what eq "reveal")
 			{
 				local $\ = "";
+				check_vault($ini);
 				$ini->OutputConfig();
 			} elsif ($what =~ s/^gen(-and-copy)?-oauth2
 						-(refresh|access)-token
