@@ -250,19 +250,19 @@ sub find_vault
 
 	if (@full_matches > 1)
 	{
-		die "More than one $prefix found";
+		die "More than one $prefix found.";
 	} elsif (@full_matches == 1)
 	{
 		return $full_matches[0];
 	} elsif (@prefix_matches > 1)
 	{
-		die "More than one $prefix found";
+		die "More than one $prefix found.";
 	} elsif (@prefix_matches == 1)
 	{
 		return $prefix_matches[0];
 	} else
 	{
-		die "$prefix not found";
+		die "$prefix not found.";
 	}
 }
 
@@ -293,26 +293,41 @@ sub load_vault
 # tab-completion.
 sub extract_completions
 {
-	my $ini = shift;
-	my @completions;
+	my ($ini, $completions) = @_;
 
+	@$completions = ();
 	for my $section ($ini->Sections())
 	{
-		push(@completions, $section);
+		push(@$completions, $section);
 		foreach my $key ($ini->Parameters($section))
 		{
-			push(@completions, $key)
+			push(@$completions, $key)
 				if $section eq "default";
-			push(@completions, "$section/$key")
+			push(@$completions, "$section/$key")
 		}
 	}
 
 	# Escape \-es and spaces to make tab-completion work on words
 	# containing escaped spaces and backslashes.
 	s/( |\\)/\\$1/g
-		for @completions;
+		for @$completions;
+}
 
-	return @completions;
+# Load the $vault and set the global references to it.
+sub open_vault
+{
+	my ($vault, $rini, $completions) = @_;
+	my $ini;
+
+	if (defined ($ini = load_vault($vault)))
+	{
+		$$rini = $ini;
+		extract_completions($ini, $completions);
+		return 1;
+	} else
+	{
+		return 0;
+	}
 }
 
 # Print $ini's sections and keys.
@@ -667,11 +682,12 @@ if ($opt_overview)
 		$term->ornaments(0);
 
 		# Set up tab-completion of sections and keys.
-		@completions = extract_completions($ini);
+		extract_completions($ini, \@completions);
 
 		# The first word can be a command.
 		my @commands = qw(
-			edit reveal view copy
+			open reopen edit
+			reveal view copy
 			gen-oauth2-refresh-token
 			gen-and-copy-oauth2-refresh-token
 			gen-oauth2-access-token
@@ -739,6 +755,9 @@ if ($opt_overview)
 					"I'm done";
 				print "!!                       - ",
 					"do it again";
+				print "[re]open [<vault>]       - ",
+					"reload the current vault or open ",
+					"another one";
 				print "edit                     - ",
 					"edit the vault file and reload it";
 				print "<Enter>                  - ",
@@ -777,18 +796,18 @@ if ($opt_overview)
 			} elsif ($what eq "")
 			{
 				overview_cmd($ini);
+			} elsif ($what =~ s/^(?:re)?open(?:\s+|$)//)
+			{	# Open a new $vault or reload the current one.
+				my $new_vault = $what
+					? find_vault(unescape($what),
+							@opt_vaults)
+					: $vault;
+				open_vault($new_vault, \$ini, \@completions)
+					and $vault = $new_vault;
 			} elsif ($what eq "edit")
-			{
-				my $new;
-
-				# If the edition was successful, reload $ini.
-				if (system($ENV{'VISUAL'}, $vault) == 0
-					&& defined ($new = load_vault($vault)))
-				{
-					$ini = $new;
-					@completions =
-						extract_completions($ini);
-				}
+			{	# If the edition was successful, reload $ini.
+				open_vault($vault, \$ini, \@completions)
+					if system($ENV{'VISUAL'}, $vault) == 0;
 			} elsif ($what eq "reveal")
 			{
 				local $\ = "";
