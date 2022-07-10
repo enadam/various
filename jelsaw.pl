@@ -16,7 +16,7 @@
 # program doesn't have to run in X.
 #
 # The interactive mode needs Term::ReadLine, and the OAuth functionality
-# deoends on LWP.
+# deoends on LWP and HTTP::Daemon (except in out-of-band mode).
 #
 # Usage: <<<
 # jelsaw.pl [--vaults|-V <vaults>] [--timeout|-t <seconds>] <vault>
@@ -144,14 +144,27 @@
 #
 # $ jelsaw.pl --oauth2 <vault> gmail/refresh
 #
-# Prints an URL for you to follow.  Once your OAuth provider has authenticated
-# you and confirmed the access request, it will return an authentication code,
-# which you need to enter this program.  Then jelsaw will exchange this code
-# for a refresh token and copy it to the clipboard.  From there you can add it
-# to the vault.
+# Prints an URL for you to open.  It will redirect your browser to your OAuth
+# provider, which will authenticate you, confirm the access reqeust, and again
+# redirect you to the webserver started by jelsaw.  It will then extract the
+# authorization code passed along by the OAuth provider, exchange it for a
+# refresh token and copy it to the clipboard.  From there you can add it to
+# the vault.
+#
+# $ jelsaw.pl --oauth2 <vault> gmail/refresh_oob
+#
+# Like above, but executes the workflow in out-of-band mode.  In this case no
+# webserver is started (so the HTTP::Daemon module needn't be installed) and
+# you will be asked to copy the authorization code displayed by the OAuth
+# provider and enter it at the prompt.  This workflow is intended as fallback
+# if the other doesn't work, and may be unsupported by your provider (eg. see
+# https://developers.googleblog.com/2022/02/making-oauth-flows-safer.html#disallowed-oob).
 #
 # See this guide how to set up an oauth2_client_id and secret:
 # https://gitlab.com/muttmua/mutt/-/blob/master/contrib/mutt_oauth2.py.README
+# Note that with GCP (Google) the refresh token will expire in 7 days unless
+# you "publish" your "app".  However, before publication you don't have to
+# submit it for verification (as long as you're the only one using it I guess).
 # >>>
 
 # Modules
@@ -489,6 +502,7 @@ sub unescape
 sub init_oauth2
 {
 	require URI;
+	require URI::QueryParam;
 	require LWP::UserAgent;
 	require HTTP::Request::Common;
 	require JSON::PP;
@@ -497,9 +511,10 @@ sub init_oauth2
 # Acquire a new refresh_token from an OAuth provider.
 sub oauth2_new_refresh_token
 {
-	my ($ini, $section, $cmd) = @_;
-	my ($provider, $client_id, $client_secret, $scope, $auth_code);
-	my ($url, $http_reply, $json);
+	my ($ini, $oob, $section, $cmd) = @_;
+	my ($provider, $client_id, $client_secret, $scope);
+	my ($auth_request_url, $http_client, $auth_code);
+	my ($http_reply, $json);
 
 	$provider	= retrieve_key($ini, $section, "oauth2_provider");
 	$client_id	= retrieve_key($ini, $section, "oauth2_client_id");
@@ -507,22 +522,124 @@ sub oauth2_new_refresh_token
 	$scope		= retrieve_key($ini, $section, "oauth2_scope");
 
 	# First send the user to get the $auth_code from the $provider.
-	$url = URI->new("$provider/o/oauth2/auth");
-	$url->query_form(
+	$auth_request_url = URI->new("$provider/o/oauth2/auth");
+	$auth_request_url->query_form(
 		client_id	=> $client_id,
 		scope		=> $scope,
-		response_type	=> "code",
-		redirect_uri	=> $OAUTH2_REDIR);
+		response_type	=> "code");
 
-	print $url->as_string();
-	do
-	{
-		local $\ = "";
-		print "Visit the URL above and enter the authorization code: ";
-	};
-	defined ($auth_code = readline(*STDIN))
-		or die "Cancelled.";
-	chomp($auth_code);
+	if ($oob)
+	{	# Copy-paste.
+		$auth_request_url->query_param(redirect_uri => $OAUTH2_REDIR);
+		print $auth_request_url;
+		do
+		{
+			local $\ = "";
+			print "Visit the URL above and enter the ",
+				"authorization code: ";
+		};
+		defined ($auth_code = readline(*STDIN))
+			or die "Cancelled.";
+		chomp($auth_code);
+	} else
+	{	# Start a webserver.
+		require HTTP::Daemon;
+		require HTTP::Status;
+		my ($server, $server_cookie);
+		my ($start_url, $finish_url, $url);
+
+		do
+		{	# Define a custom HTTP::Daemon::ClientConn,
+			# which works regarless of the value of $\.
+			package MyClient;
+
+			our @ISA = qw(HTTP::Daemon::ClientConn);
+
+			sub send_error
+			{
+				local $\ = "";
+				shift->SUPER::send_error(@_);
+			}
+
+			sub send_redirect
+			{
+				local $\ = "";
+				shift->SUPER::send_redirect(@_);
+			}
+
+			sub send_response
+			{
+				local $\ = "";
+				shift->SUPER::send_response(@_);
+			}
+		};
+
+		# Ignore requests not carrying the $server_cookie.
+		# This protects against leaking the $auth_request_url.
+		$server_cookie = int(rand(0xFFFFFFFF));
+		defined ($server = HTTP::Daemon->new(LocalAddr => '127.0.0.1'))
+			or die "$!.";
+
+		$start_url = URI->new($server->url());
+		$start_url->query_form(cookie => $server_cookie);
+		$start_url->path("start");
+		print "Please open this URL: ", $start_url;
+
+		$finish_url = $start_url->clone();
+		$finish_url->path("finish");
+
+		$auth_request_url->query_param(redirect_uri => $finish_url);
+
+		# The webserver loop.  It redirects the client to the
+		# $auth_request_url and finishes when the client requests the
+		# $finish_url via a redirect by the authentication provider.
+		for (;;)
+		{
+			my ($request, $client_cookie);
+
+			defined ($http_client = $server->accept("MyClient"))
+				or next;
+			defined ($request = $http_client->get_request())
+				or next;
+
+			if ($request->method() ne "GET")
+			{
+				$http_client->send_error(
+					HTTP::Status::HTTP_METHOD_NOT_ALLOWED());
+				next;
+			}
+
+			# Verify the $client_cookie.
+			$url = $request->uri();
+			$client_cookie = $url->query_param('cookie');
+			if (!defined $client_cookie
+				|| $client_cookie ne $server_cookie)
+			{
+				$http_client->send_error(
+					HTTP::Status::HTTP_UNAUTHORIZED());
+				next;
+			}
+
+			if ($url->path() eq $start_url->path())
+			{
+				$http_client->send_redirect($auth_request_url);
+			} elsif ($url->path() eq $finish_url->path())
+			{
+				last;
+			} else
+			{
+				$http_client->send_error(
+					HTTP::Status::HTTP_FORBIDDEN());
+			}
+		}
+
+		if (!defined ($auth_code = $url->query_param("code")))
+		{
+			$http_client->send_error(
+				HTTP::Status::HTTP_BAD_GATEWAY());
+			die "$provider: no authorization code returned";
+		}
+	}
 
 	# Exchange the $auth_code for a refresh_token.
 	$http_reply = LWP::UserAgent->new()->request(
@@ -532,14 +649,30 @@ sub oauth2_new_refresh_token
 			client_secret	=> $client_secret,
 			code		=> $auth_code,
 			grant_type	=> "authorization_code",
-			redirect_uri	=> $OAUTH2_REDIR,
+			redirect_uri	=> $auth_request_url->query_param(
+						"redirect_uri"),
 		]));
-	$http_reply->is_success()
-		or die "$provider: ", $http_reply->status_line();
+	if (!$http_reply->is_success())
+	{
+		$http_client->send_response($http_reply)
+			if defined $http_client;
+		die "$provider: ", $http_reply->status_line();
+	}
 
 	$json = JSON::PP::decode_json($http_reply->content());
-	defined $$json{"refresh_token"}
-		or die "$provider: 'refresh_token' missing";
+	if (!defined $$json{"refresh_token"})
+	{
+		$http_client->send_error(HTTP::Status::HTTP_BAD_GATEWAY())
+			if defined $http_client;
+		die "$provider: 'refresh_token' missing";
+	}
+
+	if (defined $http_client)
+	{
+		$http_client->send_response(HTTP::Response->new(
+			HTTP::Status::HTTP_OK(), "OK", undef,
+			"Success!  You can close this window now."));
+	}
 
 	if ($cmd eq "view")
 	{	# If the access_token is missing, that's odd, but not a
@@ -704,7 +837,9 @@ if ($opt_overview)
 			open reopen edit
 			reveal view copy
 			gen-oauth2-refresh-token
+			gen-oauth2-refresh-token-oob
 			gen-and-copy-oauth2-refresh-token
+			gen-and-copy-oauth2-refresh-token-oob
 			gen-oauth2-access-token
 			gen-and-copy-oauth2-access-token);
 		$term->Attribs->{'completion_function'} = sub
@@ -791,20 +926,25 @@ if ($opt_overview)
 					"copy <section>/password or ",
 					"default/password";
 				print "";
-				print "gen-oauth2-refresh-token          ",
-					"[<section>]";
+				print "gen-oauth2-refresh-token",
+					' ' x 16, "[<section>]";
 				print "    Acquire and print a new refresh ",
 					"token from an OAuth provider.";
-				print "gen-oauth2-access-token           ",
-					"[<section>]";
+				print "gen-oauth2-refresh-token-oob",
+					' ' x 12, "[<section>]";
+				print "    Acquire a new refresh token in ",
+					"out-of-band mode (with manual ",
+					"copy-paste).";
+				print "gen-oauth2-access-token",
+					' ' x 17, "[<section>]";
 				print "    Acquire and print a new access ",
 					"token.";
-				print "gen-and-copy-oauth2-refresh-token ",
-					"[<section>]";
+				print "gen-and-copy-oauth2-refresh-token",
+					"[-oob] [<section>]";
 				print "    Acquire a new refresh token and ",
 					"copy it to the clipboard.";
-				print "gen-and-copy-oauth2-access-token  ",
-					"[<section>]";
+				print "gen-and-copy-oauth2-access-token",
+					' ' x 8, "[<section>]";
 				print "    Acquire a new access token and ",
 					"copy it to the clipboard.";
 				# >>>
@@ -837,17 +977,20 @@ if ($opt_overview)
 				check_vault($ini);
 				$ini->OutputConfig();
 			} elsif ($what =~ s/^gen(-and-copy)?-oauth2
-						-(refresh|access)-token
+						-refresh-token(-oob)?
 						(?:\s+|$)//x)
 			{
-				my $cmd = defined $1 ? "copy" : "view";
-				my $fun = $2 eq "refresh"
-					? \&oauth2_new_refresh_token
-					: \&oauth2_refresh_access_token;
 				init_oauth2();
-				$fun->($ini,
+				oauth2_new_refresh_token($ini, defined $2,
 					$what ? unescape($what) : "default",
-					$cmd);
+					defined $1 ? "copy" : "view");
+			} elsif ($what =~ s/^gen(-and-copy)?-oauth2
+						-access-token(?:\s+|$)//x)
+			{
+				init_oauth2();
+				oauth2_refresh_access_token($ini,
+					$what ? unescape($what) : "default",
+					defined $1 ? "copy" : "view");
 			} elsif ($what =~ s/^view(?:\s+|$)//)
 			{
 				view_cmd($ini, unescape($what));
@@ -874,9 +1017,9 @@ if ($opt_overview)
 	$cmd = defined $opt_view ? "view" : "copy";
 	($section, $key) = parse_section_and_key(
 		$opt_view || $opt_copy, "access_token");
-	if ($key eq "refresh" || $key eq "refresh_token")
+	if ($key =~ /^refresh(?:_token)?(_oob)?$/)
 	{
-		oauth2_new_refresh_token($ini, $section, $cmd);
+		oauth2_new_refresh_token($ini, defined $1, $section, $cmd);
 	} elsif ($key eq "access" || $key eq "access_token")
 	{
 		oauth2_refresh_access_token($ini, $section, $cmd);
