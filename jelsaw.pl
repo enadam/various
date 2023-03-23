@@ -4,16 +4,16 @@
 #
 # Take a gpg-encrypted INI-file (a vault) from an arbitrary directory
 # and copy one of its secrets (a password for example) to the primary
-# X selection, from which you can paste it in another window with the
-# middle button of the mouse.
+# X or console selection, from which you can paste it in another window
+# or terminal with the middle button of the mouse.
 #
 # The vaults are searched under the directory specified by $JELSAW_VAULT
 # and its subdirectories or ~/.config/jelsaw by default (you can symlink
 # it to anywhere else).
 #
 # To run the Config::IniFiles perl module (libconfig-inifiles-perl in Debian),
-# GnuPG and xsel(1) must be installed.  If the clipboard is not used, the
-# program doesn't have to run in X.
+# GnuPG and xsel(1) must be installed.  The program supports both X and the
+# text console (via gpm or consolation).
 #
 # The interactive mode needs Term::ReadLine, and the OAuth functionality
 # deoends on LWP and HTTP::Daemon (except in out-of-band mode).
@@ -169,11 +169,21 @@
 
 # Modules
 use strict;
-use IPC::Open2;
+use POSIX;
+use IO::File;
 use Getopt::Long;
 use Config::IniFiles;
 
 # Constants
+use constant TIOCL_SETSEL	=> 2;
+use constant TIOCL_SELCHAR	=> 0;
+
+my $CLRSCR			= "\e[1;1H" . "\e[2J";
+my $CSRPOS_REQUEST		= "\e[6n";
+my $CSRPOS_REPLY		= qr/^\e\[(\d+);(\d+)R$/;
+my $COLOR_INVISIBLE		= "\e[30;40m";
+my $COLOR_DEFAULT		= "\e[39;49m";
+
 my @DFLT_VAULTS = ("$ENV{'HOME'}/.config/jelsaw");
 my @GPG = qw(gpg --batch --quiet --decrypt --);
 my @XSEL = qw(xsel --input --logfile /dev/null --nodetach);
@@ -440,17 +450,172 @@ sub uncomment
 	return $str;
 }
 
-# Pass $str to xsel(1) to copy it to the clipboard.
-sub copy_to_clipboard
+# Wait until the user hits <Enter> or $Opt_timeout elapses.
+sub wait_for_enter
 {
-	use POSIX;
+	if ($Opt_timeout)
+	{
+		$SIG{'ALRM'} = sub { die };
+		alarm($Opt_timeout);
+	}
+
+	eval
+	{
+		local $SIG{'__DIE__'};
+		readline;
+		alarm(0);
+	};
+}
+
+# Determine the cursor position on $tty.
+sub cursor_position
+{
+	my $tty = shift;
+	my ($term, $prev_lflag, $n, $pos);
+
+	# We'll need to print $CSRPOS_REQUEST on $tty.  Turn off canonical
+	# input processing and echo to make it work and invisible to the user.
+	$term = POSIX::Termios->new();
+	defined $term->getattr($tty->fileno())
+		or die "tcgetattr(\"/dev/tty\"): $!";
+	$prev_lflag = $term->getlflag();
+	$term->setlflag($prev_lflag & ~(POSIX::ICANON|POSIX::ECHO));
+	defined $term->setattr($tty->fileno(), POSIX::TCSANOW)
+		or die "tcsetattr(\"/dev/tty\"): $!";
+
+	# Request the cursor position.
+	$tty->print($CSRPOS_REQUEST);
+
+	# Wait for the reply.
+	for (;;)
+	{
+		my $rfd;
+
+		vec($rfd, $tty->fileno(), 1) = 1;
+		if (($n = select($rfd, undef, undef, undef)) < 0)
+		{
+			die "select(\"/dev/tty\"): $!";
+		} elsif ($n > 0)
+		{
+			last;
+		}
+	}
+
+	# Restore the terminal attributes.
+	$term->setlflag($prev_lflag);
+	defined $term->setattr($tty->fileno(), POSIX::TCSANOW)
+		or die "tcsetattr(\"/dev/tty\"): $!";
+
+	# Determine the length of the reply.
+	$n = pack("L", 0);
+	defined $tty->ioctl(FIONREAD(), $n)
+		or die "ioctl(\"/dev/tty\", FIONREAD): $!";
+	$n = unpack("L", $n);
+
+	# Read and parse the reply.
+	defined $tty->read($pos, $n)
+		or die "/dev/tty: $!";
+	$pos =~ $CSRPOS_REPLY
+		or die "/dev/tty: couldn't determine current cursor position";
+	return ($1, $2);
+}
+
+# Return the number of rows and columns of the terminal.
+sub terminal_size
+{
+	my $tty = shift;
+	my ($template, $struct, $rows, $cols);
+
+	$template = "S!4";
+	$struct = pack($template);
+	defined $tty->ioctl(TIOCGWINSZ(), $struct)
+		or die "ioctl(\"/dev/tty\", TIOCGWINSZ): $!";
+	($rows, $cols) = unpack($template, $struct);
+
+	return ($rows, $cols);
+}
+
+# Copy the contents of the currently active virtual console from ($x1, $y1)
+# to ($x2, $y2) (inclusive).
+sub set_console_selection
+{
+	my $tty = shift;
+	my ($x1, $y1, $x2, $y2) = @_;
+
+	my $struct = pack("c S!5", TIOCL_SETSEL,
+				$x1, $y1, $x2, $y2, TIOCL_SELCHAR);
+	defined $tty->ioctl(TIOCLINUX(), $struct)
+		or die "ioctl(\"/dev/tty\", TIOCLINUX, TIOCL_SETSEL): $!";
+}
+
+# Copy $str to the console selection, so it can be pasted by gpm.
+sub copy_to_console_selection
+{
+	my $str = shift;
+	my ($tty, $width, $height, $x, $y);
+
+	# Import the ioctl() constants we'll use.
+	do
+	{	# There are some warnings while importing this module,
+		# suppress them.
+		local $^W = 0;
+		require "sys/ioctl.ph";
+	};
+
+	# The standard input and output could be redirectred to somewhere,
+	# Open the controlling terminal we can use to operate on.
+	defined ($tty = IO::File->new("/dev/tty", "r+"))
+		or die "/dev/tty: $!";
+	$tty->autoflush(1);
+	local $\ = "";
+
+	# Print $str on the top-left of the screen in black on black
+	# background, so it's not visible even for a fraction of a second.
+	$tty->print($CLRSCR, $COLOR_INVISIBLE, $str, $COLOR_DEFAULT);
+
+	# Printing something on the screeen automatically advances the cursor,
+	# but for set_console_selection() we need the position of the last
+	# printed character, otherwise a newline will be appended.  Except if
+	# $str has just filled a line, in which case the cursor will remain
+	# on the last column and we shouldn't adjust $x.  This algorithm is
+	# fuzzy at best.
+	($y, $x) = cursor_position($tty);
+	($height, $width) = terminal_size($tty);
+	unless ($x == $width && length($str) % $width == 0)
+	{
+		if ($x > 1)
+		{
+			$x--;
+		} elsif ($y > 1)
+		{	# $str must be ending in a newline.
+			$y--;
+			$x = $width;
+		} elsif ($str eq "")
+		{	# Copy a space, we can't do less.
+		} else
+		{	# $str must include control characters, and driven the
+			# cursor back to the top-left corner.  Copy the whole
+			# screen, we can't do anything more sensible with it.
+			($y, $x) = ($height, $width);
+		}
+	}
+
+	# Copy the contents of the screen from the top-left corner, then clear
+	# the screen at once to make $str irrecoverable except via pasting.
+	set_console_selection($tty, 1, 1, $x, $y);
+	$tty->print($CLRSCR, "Go!\n");
+	wait_for_enter();
+	$tty->print($CLRSCR);
+	set_console_selection($tty, 1, 1, 1, 1);
+}
+
+# Pass $str to xsel(1) to copy it to the primary selection.
+sub copy_to_x11_selection
+{
 	my $str = shift;
 	my $xsel;
 	local *XSEL;
 
-	# X might be running on another virtual console.
-	exists $ENV{'DISPLAY'}
-		or $ENV{'DISPLAY'} = ":0";
 	defined ($xsel = open(XSEL, "|-", @XSEL))
 		or die "$XSEL[0]: $!";
 
@@ -462,22 +627,18 @@ sub copy_to_clipboard
 	print XSEL $str;
 	select(STDOUT);
 	POSIX::close(fileno(XSEL));
+
 	print "Go!\n";
-
-	if ($Opt_timeout)
-	{	# Kill $xsel in $Opt_timeout seconds.
-		$SIG{'ALRM'} = sub { die };
-		alarm($Opt_timeout);
-	}
-
-	# Kill $xsel and exit when the user hits enter.
-	eval
-	{
-		local $SIG{'__DIE__'};
-		readline;
-		alarm(0);
-	};
+	wait_for_enter();
 	kill(TERM => $xsel);
+}
+
+# Copy a string to the appropriate selection.
+sub copy_to_selection
+{
+	exists $ENV{'DISPLAY'}
+		? copy_to_x11_selection(@_)
+		: copy_to_console_selection(@_);
 }
 
 # Copy a key from $ini to the clipboard.
@@ -485,8 +646,9 @@ sub copy_cmd
 {
 	my ($ini, $what) = @_;
 
-	copy_to_clipboard(uncomment(retrieve_key(
-		$ini, parse_section_and_key($what, "password"))));
+	copy_to_selection(
+		uncomment(retrieve_key(
+			$ini, parse_section_and_key($what, "password"))));
 }
 
 # Unescape "\ " and "\\".
@@ -682,7 +844,7 @@ sub oauth2_new_refresh_token
 			if defined $$json{"access_token"};
 	} else
 	{
-		copy_to_clipboard($$json{"refresh_token"});
+		copy_to_selection($$json{"refresh_token"});
 	}
 }
 
@@ -718,7 +880,7 @@ sub oauth2_refresh_access_token
 		print $$json{"access_token"};
 	} else
 	{
-		copy_to_clipboard($$json{"access_token"});
+		copy_to_selection($$json{"access_token"});
 	}
 }
 
