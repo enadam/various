@@ -19,8 +19,8 @@
 # deoends on LWP and HTTP::Daemon (except in out-of-band mode).
 #
 # Usage: <<<
-# jelsaw.pl [--vaults|-V <vaults>] [--timeout|-t <seconds>] <vault>
-#           [<section>/][<key>]
+# jelsaw.pl [--vaults|-V <vaults>] [--newline|-n] [--timeout|-t <seconds>]
+#           <vault> [<section>/][<key>]
 #   Copy the secret value of <key> ("password" by default) from one of the
 #   <vault>'s <section>s (the "default" one if unspecified).  <vault> is
 #   the case-insensitive prefix of an INI-file's name containing secrets.
@@ -28,7 +28,8 @@
 #   or the locations described above.  You have <seconds> time (5 by default)
 #   to paste the secret value.  After that the program exits and the secret
 #   is deleted from the selection.  To finish earlier, press <Enter>.  -t 0
-#   disables the timeout.
+#   disables the timeout.  By default the secret value is pasted without a
+#   terminating newline.  Specify --newline to add one.
 #
 # jelsaw.pl --find|-f <vault>
 #   Return the vault that woule be opened.
@@ -190,7 +191,7 @@ my @XSEL = qw(xsel --input --logfile /dev/null --nodetach);
 my $OAUTH2_REDIR = "urn:ietf:wg:oauth:2.0:oob";
 
 # Private variables
-my $Opt_timeout;
+my ($Opt_newline, $Opt_timeout);
 
 # Program code
 # Strip the end of a "die" message.
@@ -214,19 +215,24 @@ sub usage
 	$me =~ s!^.*/+!!;
 
 	print $fh "INI+GPG-based password manager.";
-      	print $fh "See $0 for the complete documentation.";
 	print $fh "";
 	print $fh "Usage:";
-	print $fh "  $me [--vaults|-V <dir>] <vault> [[<section>]/][<key>]";
+	print $fh "  $me <vault> [[<section>]/][<key>]";
 	print $fh "  $me --find|-f <vault>";
 	print $fh "  $me --edit|-w <vault>";
 	print $fh "  $me --all|-a <vault>";
 	print $fh "  $me --view|-v|--copy|-c [<section>]/ <vault>";
 	print $fh "  $me --view|-v|--copy|-c [[<section>]/]<key> <vault>";
-	print $fh "  $me --copy|-c <section-and/or-key> ",
-			"[--timeout|-t <seconds>] <vault>";
+	print $fh "  $me --copy|-c <section-and/or-key> <vault>";
 	print $fh "  $me --overview|-l <vault>";
 	print $fh "  $me --interactive|-i [<vault>]";
+	print $fh "";
+	print $fh "Optional parameters:";
+	print $fh "  --vaults|-V <dir>";
+	print $fh "  --newline|-n";
+	print $fh "  --timeout|-t <seconds>";
+	print $fh "";
+      	print $fh "See $0 for the complete documentation.";
 
 	exit($error);
 }
@@ -553,6 +559,7 @@ sub copy_to_console_selection
 {
 	my $str = shift;
 	my ($tty, $width, $height, $x, $y);
+	my $full_line;
 
 	# Import the ioctl() constants we'll use.
 	do
@@ -572,19 +579,51 @@ sub copy_to_console_selection
 	# Print $str on the top-left of the screen in black on black
 	# background, so it's not visible even for a fraction of a second.
 	$tty->print($CLRSCR, $COLOR_INVISIBLE, $str, $COLOR_DEFAULT);
-
-	# Printing something on the screeen automatically advances the cursor,
-	# but for set_console_selection() we need the position of the last
-	# printed character, otherwise a newline will be appended.  Except if
-	# $str has just filled a line, in which case the cursor will remain
-	# on the last column and we shouldn't adjust $x.  This algorithm is
-	# fuzzy at best.
 	($y, $x) = cursor_position($tty);
 	($height, $width) = terminal_size($tty);
-	unless ($x == $width && length($str) % $width == 0)
-	{
-		if ($x > 1)
-		{
+
+	# Printing something on the screeen automatically advances the cursor,
+	# except if the string's last character happens to land on the last
+	# column of the terminal.  $full_line tries to capture this condition.
+	# If false, we assume there's a trailing whitespaece, which would add
+	# a newline to the selection when pasting.  Depending on $Opt_newline
+	# this may or may not be what we want.  If not, we need to update the
+	# end coordinates.  This algorithm is fuzzy at best.
+	$full_line = ($x == $width && length($str) % $width == 0);
+	if ($Opt_newline)
+	{	# The user wants to paste the selection with a newline.
+		if ($full_line)
+		{	# We need to add a newline, but can't if we have a
+			# screenful of text; don't try to be smart in this
+			# case.
+			if ($y < $height)
+			{
+				$tty->print("\n");
+				$y++;
+				$x = $width;
+			}
+		} elsif ($x > 1)
+		{	# There's a trailing whitespace, which will be pasted
+			# as newline.
+		} elsif ($y > 1)
+		{	# $str already ends in a newline.
+			$y--;
+			$x = $width;
+		} elsif ($str eq "")
+		{	# Copy a single empty line.
+			$x = $width;
+		} else
+		{	# $str must include control characters, and driven the
+			# cursor back to the top-left corner.  Copy the whole
+			# screen, we can't do anything more sensible with it.
+			($y, $x) = ($height, $width);
+		}
+	} else
+	{	# Remove trailing whitespace.
+		if ($full_line)
+		{	# Nothing to remove.
+		} elsif ($x > 1)
+		{	# The normal case.
 			$x--;
 		} elsif ($y > 1)
 		{	# $str must be ending in a newline.
@@ -593,9 +632,7 @@ sub copy_to_console_selection
 		} elsif ($str eq "")
 		{	# Copy a space, we can't do less.
 		} else
-		{	# $str must include control characters, and driven the
-			# cursor back to the top-left corner.  Copy the whole
-			# screen, we can't do anything more sensible with it.
+		{	# See above.
 			($y, $x) = ($height, $width);
 		}
 	}
@@ -615,6 +652,8 @@ sub copy_to_x11_selection
 	my $str = shift;
 	my $xsel;
 	local *XSEL;
+
+	$str .= "\n" if $Opt_newline && $str !~ /\n$/;;
 
 	defined ($xsel = open(XSEL, "|-", @XSEL))
 		or die "$XSEL[0]: $!";
@@ -909,6 +948,7 @@ exit(1) unless GetOptions(
 	'v|view=s'	=> \$opt_view,
 	'c|copy=s'	=> \$opt_copy,
 	'A|oauth2'	=> \$opt_oauth2,
+	'n|newline!'	=> \$Opt_newline,
 	't|timeout=i'	=> \$Opt_timeout,
 	'l|overview'	=> \$opt_overview,
 	'i|interactive'	=> \$opt_interactive,
@@ -997,7 +1037,7 @@ if ($opt_overview)
 		# The first word can be a command.
 		my @commands = qw(
 			open reopen edit
-			reveal view copy
+			reveal view copy newline
 			gen-oauth2-refresh-token
 			gen-oauth2-refresh-token-oob
 			gen-and-copy-oauth2-refresh-token
@@ -1087,6 +1127,8 @@ if ($opt_overview)
 				print "copy [<section>/]        - ",
 					"copy <section>/password or ",
 					"default/password";
+				print "newline                  - ",
+					"toggle --newline";
 				print "";
 				print "gen-oauth2-refresh-token",
 					' ' x 16, "[<section>]";
@@ -1138,6 +1180,17 @@ if ($opt_overview)
 				local $\ = "";
 				check_vault($ini);
 				$ini->OutputConfig();
+			} elsif ($what eq "newline")
+			{
+				$Opt_newline = !$Opt_newline;
+				if ($Opt_newline)
+				{
+					print "Add newline to selection.";
+				} else
+				{
+					print "Do not add a newline to the ",
+						"selection.";
+				}
 			} elsif ($what =~ s/^gen(-and-copy)?-oauth2
 						-refresh-token(-oob)?
 						(?:\s+|$)//x)
