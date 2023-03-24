@@ -19,18 +19,24 @@
 # deoends on LWP and HTTP::Daemon (except in out-of-band mode).
 #
 # Usage: <<<
-# jelsaw.pl [--vaults|-V <vaults>] [--newline|-n] [--timeout|-t <seconds>]
-#           <vault> [<section>/][<key>]
+# jelsaw.pl [--vaults|-V <vaults>]
+#           [--newline|-n] [--detach|-d|--detach-without-timeout|-D]
+#           [--timeout|-t <seconds>] <vault> [<section>/][<key>]
 #   Copy the secret value of <key> ("password" by default) from one of the
 #   <vault>'s <section>s (the "default" one if unspecified).  <vault> is
 #   either a direct path to an INI file or it's taken as the case-insensitive
 #   prefix of a file name.  In the latter case the <vault> is searched in
 #   <vaults> (repeat the option to specify more than one) or the locations
-#   described above.  You have <seconds> time (5 by default) to paste the
-#   secret value.  After that the program exits and the secret is deleted from
-#   the selection.  You can finish earlier by pressing <Enter>.  -t 0 disables
-#   the timeout.  By default the secret value is pasted without a terminating
-#   newline.  Specify --newline to add one.
+#   described above.
+#
+#   You have <seconds> time (5 by default) to paste the secret value.  Unless
+#   disabled with --detach, during this time a prompt is shown, which you can
+#   dismiss by pressing <Enter>.  Afterwards the selection is cleared.  -t 0
+#   disables the timeout.  With --detach-without-timeout the selection is kept
+#   until something else is selected.
+#
+#   By default the secret value is pasted without a terminating newline.
+#   Specify --newline to add one.
 #
 # jelsaw.pl --find|-f <vault>
 #   Return the vault that woule be opened.
@@ -188,11 +194,11 @@ my $COLOR_DEFAULT		= "\e[39;49m";
 
 my @DFLT_VAULTS = ("$ENV{'HOME'}/.config/jelsaw");
 my @GPG = qw(gpg --batch --quiet --decrypt --);
-my @XSEL = qw(xsel --input --logfile /dev/null --nodetach);
+my @XSEL = qw(xsel --input --logfile /dev/null);
 my $OAUTH2_REDIR = "urn:ietf:wg:oauth:2.0:oob";
 
 # Private variables
-my ($Opt_newline, $Opt_timeout);
+my ($Opt_newline, $Opt_detach, $Opt_timeout);
 
 # Program code
 # Strip the end of a "die" message.
@@ -231,6 +237,7 @@ sub usage
 	print $fh "Optional parameters:";
 	print $fh "  --vaults|-V <dir>";
 	print $fh "  --newline|-n";
+	print $fh "  --detach|-d|--detach-without-timeout|-D";
 	print $fh "  --timeout|-t <seconds>";
 	print $fh "";
       	print $fh "See $0 for the complete documentation.";
@@ -657,22 +664,47 @@ sub copy_to_console_selection
 	# Copy the contents of the screen from the top-left corner, then clear
 	# the screen at once to make $str irrecoverable except via pasting.
 	set_console_selection($tty, 1, 1, $x, $y);
-	$tty->print($CLRSCR, "Go!\n");
-	wait_for_enter();
-	$tty->print($CLRSCR);
-	set_console_selection($tty, 1, 1, 1, 1);
+
+	if (!$Opt_detach)
+	{
+		$tty->print($CLRSCR, "Go!\n");
+		wait_for_enter();
+		$tty->print($CLRSCR);
+		set_console_selection($tty, 1, 1, 1, 1);
+	} else
+	{
+		$tty->print($CLRSCR);
+		if ($Opt_timeout && fork() == 0)
+		{	# Destroy the selection when $Opt_timeout has elapsed.
+			sleep($Opt_timeout);
+			set_console_selection($tty,
+				$width, $height, $width, $height);
+			exit;
+		}
+	}
 }
 
 # Pass $str to xsel(1) to copy it to the primary selection.
 sub copy_to_x11_selection
 {
 	my $str = shift;
-	my $xsel;
+	my (@xsel, $xsel);
 	local *XSEL;
 
 	$str .= "\n" if $Opt_newline && $str !~ /\n$/;;
 
-	defined ($xsel = open(XSEL, "|-", @XSEL))
+	# When $Opt_detach, leave it up to xsel to exit when done.
+	@xsel = @XSEL;
+	if (!$Opt_detach)
+	{
+		push(@xsel, "--nodetach");
+	} elsif ($Opt_timeout)
+	{
+		push(@xsel, "--selectionTimeout");
+		push(@xsel, $Opt_timeout * 1000);
+	}
+
+	defined ($xsel = open(XSEL, "|-", @xsel))
 		or die "$XSEL[0]: $!";
 
 	# $xsel reads STDIN until EOF, so we must close the input pipe.
@@ -684,9 +716,12 @@ sub copy_to_x11_selection
 	select(STDOUT);
 	POSIX::close(fileno(XSEL));
 
-	print "Go!\n";
-	wait_for_enter();
-	kill(TERM => $xsel);
+	if (!$Opt_detach)
+	{
+		print "Go!\n";
+		wait_for_enter();
+		kill(TERM => $xsel);
+	}
 }
 
 # Copy a string to the appropriate selection.
@@ -966,6 +1001,11 @@ exit(1) unless GetOptions(
 	'c|copy=s'	=> \$opt_copy,
 	'A|oauth2'	=> \$opt_oauth2,
 	'n|newline!'	=> \$Opt_newline,
+	'd|detach!'	=> \$Opt_detach,
+	'D|detach-without-timeout' => sub {
+		$Opt_detach = 1;
+		$Opt_timeout = 0;
+	},
 	't|timeout=i'	=> \$Opt_timeout,
 	'l|overview'	=> \$opt_overview,
 	'i|interactive'	=> \$opt_interactive,
@@ -1055,7 +1095,7 @@ if ($opt_overview)
 		my @commands = qw(
 			open reopen edit
 			reveal view copy
-			newline timeout
+			newline detach timeout
 			gen-oauth2-refresh-token
 			gen-oauth2-refresh-token-oob
 			gen-and-copy-oauth2-refresh-token
@@ -1147,6 +1187,8 @@ if ($opt_overview)
 					"default/password";
 				print "newline                  - ",
 					"toggle --newline";
+				print "detach                   - ",
+					"toggle --detach";
 				print "timeout <seconds>        - ",
 					"change --timeout";
 				print "";
@@ -1210,6 +1252,18 @@ if ($opt_overview)
 				{
 					print "Do not add a newline to the ",
 						"selection.";
+				}
+			} elsif ($what eq "detach")
+			{
+				$Opt_detach = !$Opt_detach;
+				if ($Opt_detach)
+				{
+					print "Return to prompt before ",
+						"pasting selection.";
+				} else
+				{
+					print "Wait for selection to be ",
+						"pasted.";
 				}
 			} elsif ($what =~ s/^timeout(?:\s+|$)//)
 			{
