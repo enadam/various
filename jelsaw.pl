@@ -2,10 +2,10 @@
 #
 # jelsaw.pl -- simple password manager with OAuth 2.0 support
 #
-# Take a gpg-encrypted INI-file (a vault) from an arbitrary directory
-# and copy one of its secrets (a password for example) to the primary
-# X or console selection, from which you can paste it in another window
-# or terminal with the middle button of the mouse.
+# Secrets are taken from INI files and the chosen one is copied to the primary
+# X or console selection, from which you can paste it in another window or
+# terminal with the middle button of the mouse.  If an INI file is encrypted
+# with GnuPG, it is decyrpted automatically.
 #
 # The vaults are searched under the directory specified by $JELSAW_VAULT
 # and its subdirectories or ~/.config/jelsaw by default (you can symlink
@@ -252,7 +252,7 @@ sub find_vault
 		$_ = "$_/$1" for @dirs;
 
 	}
-	$pattern = qr!^.*/\Q$prefix\E(.*)\.gpg$!i;
+	$pattern = qr!^.*/\Q$prefix\E(.*)\.(?:ini|gpg)$!i;
 
 	# Search all subdirectories of @dirs (except if $is_absolute).
 	while (@dirs)
@@ -295,17 +295,30 @@ sub find_vault
 	}
 }
 
+# Return whether a vault should be decrypted when opening it.
+sub is_encrypted
+{
+	$_[0] =~ /\.gpg$/
+}
+
 # Decrypt the contents of $vault and parse it as an INI.
 sub load_vault
 {
 	my $vault = shift;
 	my $ini;
 
-	open(GPG, '-|', @GPG, $vault)
-		or die "$GPG[0]: $!";
-	$ini = Config::IniFiles->new(-file => \*GPG, -fallback => "default");
-	close(GPG) # Wait until @GPG finishes to see if there was an error.
-		or exit($? >> 8);
+	if (is_encrypted($vault))
+	{
+		open(GPG, '-|', @GPG, $vault)
+			or die "$GPG[0]: $!";
+		$ini = Config::IniFiles->new(-file => \*GPG, -fallback => "default");
+		close(GPG) # Wait until @GPG finishes to see if there was an error.
+			or return undef;
+	} else
+	{
+		$ini = Config::IniFiles->new(-file => $vault, -fallback => "default");
+	}
+
 	if (!defined $ini)
 	{	# Syntax error in the $vault.
 		local $, = "\n";
@@ -1009,7 +1022,7 @@ if ($opt_find)
 	exec($ENV{'VISUAL'}, $vault);
 } elsif ($opt_view_all)
 {	# Show the whole $vault in cleartext?
-	exec(@GPG, $vault)
+	exec(is_encrypted($vault) ? @GPG : qw(cat), $vault)
 		or die "$GPG[0]: $!";
 } elsif (defined $vault && !defined ($ini = load_vault($vault)))
 {
