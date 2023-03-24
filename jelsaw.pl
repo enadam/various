@@ -1054,7 +1054,8 @@ if ($opt_overview)
 		# The first word can be a command.
 		my @commands = qw(
 			open reopen edit
-			reveal view copy newline
+			reveal view copy
+			newline timeout
 			gen-oauth2-refresh-token
 			gen-oauth2-refresh-token-oob
 			gen-and-copy-oauth2-refresh-token
@@ -1146,6 +1147,8 @@ if ($opt_overview)
 					"default/password";
 				print "newline                  - ",
 					"toggle --newline";
+				print "timeout <seconds>        - ",
+					"change --timeout";
 				print "";
 				print "gen-oauth2-refresh-token",
 					' ' x 16, "[<section>]";
@@ -1208,6 +1211,11 @@ if ($opt_overview)
 					print "Do not add a newline to the ",
 						"selection.";
 				}
+			} elsif ($what =~ s/^timeout(?:\s+|$)//)
+			{
+				$what =~ /^\d+$/
+					or die "Usage: timeout <seconds>";
+				$Opt_timeout = int($what);
 			} elsif ($what =~ s/^gen(-and-copy)?-oauth2
 						-refresh-token(-oob)?
 						(?:\s+|$)//x)
