@@ -23,13 +23,14 @@
 #           <vault> [<section>/][<key>]
 #   Copy the secret value of <key> ("password" by default) from one of the
 #   <vault>'s <section>s (the "default" one if unspecified).  <vault> is
-#   the case-insensitive prefix of an INI-file's name containing secrets.
-#   It is searched in <vaults> (repeat the option to specify more than one)
-#   or the locations described above.  You have <seconds> time (5 by default)
-#   to paste the secret value.  After that the program exits and the secret
-#   is deleted from the selection.  To finish earlier, press <Enter>.  -t 0
-#   disables the timeout.  By default the secret value is pasted without a
-#   terminating newline.  Specify --newline to add one.
+#   either a direct path to an INI file or it's taken as the case-insensitive
+#   prefix of a file name.  In the latter case the <vault> is searched in
+#   <vaults> (repeat the option to specify more than one) or the locations
+#   described above.  You have <seconds> time (5 by default) to paste the
+#   secret value.  After that the program exits and the secret is deleted from
+#   the selection.  You can finish earlier by pressing <Enter>.  -t 0 disables
+#   the timeout.  By default the secret value is pasted without a terminating
+#   newline.  Specify --newline to add one.
 #
 # jelsaw.pl --find|-f <vault>
 #   Return the vault that woule be opened.
@@ -244,6 +245,9 @@ sub find_vault
 	my $prefix = shift;
 	my ($is_absolute, @dirs);
 	my ($pattern, @prefix_matches, @full_matches);
+
+	# Allow opening a vault by direct path.
+	return $prefix if -e $prefix;
 
 	@dirs = @_;
 	$is_absolute = $prefix =~ s!^/+!!;
