@@ -318,6 +318,8 @@ sub load_vault
 	my $vault = shift;
 	my $ini;
 
+	print STDERR "Opening $vault"
+		if -t STDOUT;
 	if (is_encrypted($vault))
 	{
 		open(GPG, '-|', @GPG, $vault)
@@ -333,7 +335,6 @@ sub load_vault
 	if (!defined $ini)
 	{	# Syntax error in the $vault.
 		local $, = "\n";
-		print STDERR "$vault";
 		print STDERR @Config::IniFiles::errors;
 		return undef;
 	} else
