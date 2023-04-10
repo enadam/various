@@ -7,7 +7,7 @@
 #
 # Synopsis:
 #   gimme.pl [--open|--listen <address>] [--port <port>] [--chroot]
-#            [--fork [<max-procs>]] [<dir>]
+#            [--fork [<max-procs>]] [--nogimme] [<dir>]
 #
 # <address> is the one to listen on, defaulting to localhost.  Use --open
 # to make the service available on all interfaces.  By default the port
@@ -44,11 +44,11 @@
 # Special files:
 # -- If the requested path is a directory and there is not a .dirlist
 #    file therein, the directory's contents are listed, sorted by last
-#    modification time.  There will be "Gimme!" links for directories
-#    that let clients download them in a single .tar archive.  (This
-#    capability was the primary motivation for Gimme.)  When creating
-#    a tarball symlinks are not followed.  These and other navigation
-#    links are not presented to robots.
+#    modification time.  Unless disabled with --nogimme, there will be
+#    "Gimme!" links for directories that let clients download them in a
+#    single .tar archive.  (This capability was the primary motivation
+#    for this program.) When creating a tarball symlinks are not followed.
+#    These and other navigation links are not presented to robots.
 # -- If a .dirlist file is present in the directory, its contents are
 #    returned as the directory listing.  .dirlist can also be a symlink
 #    pointing to another file or directory, in which case the target
@@ -369,6 +369,9 @@ chomp($SITE);
 # Don't tire these user agents with navigation bar or advertisement.
 my $ROBOTS = qr/\b(?:wget|googlebot)\b/i;
 
+# Display and serve Gimme! links?
+my $Opt_gimme = 1;
+
 # Value of the --fork option.
 my $Opt_forking;
 
@@ -576,21 +579,25 @@ sub send_dir
 	{
 		push(@upper, mklink($location, 'Site root'));
 		push(@lower, mklink('Gimme!', 'Download site',
-					"/$SITE.tar.gz", 'gimme'));
+					"/$SITE.tar.gz", 'gimme'))
+			if $Opt_gimme;
 
 		my @dirs = $path->dirs();
 		while (@dirs)
 		{
 			my $dir = shift(@dirs);
 			$location->add($dir);
-			push(@upper, mklink($dir, @dirs > 0
-				? 'Go to upper directory'
-				: 'This directory',
+			push(@upper, mklink($dir,
+				@dirs > 0
+					? 'Go to upper directory'
+					: 'This directory',
 				$location));
-			push(@lower, mklink('Gimme!', @dirs > 0
-				? 'Download tree'
-				: 'Download this directory',
-				"$location/$dir.tar.gz", 'gimme'));
+			push(@lower, mklink('Gimme!',
+				@dirs > 0
+					? 'Download tree'
+					: 'Download this directory',
+					"$location/$dir.tar.gz", 'gimme'))
+				if $Opt_gimme;
 		}
 
 		$navi = table(
@@ -645,7 +652,7 @@ sub send_dir
 		} elsif (-d _)
 		{	# Directory, give a download link unless the client
 			# $isrobi.
-			push(@row, $isrobi
+			push(@row, !$Opt_gimme || $isrobi
 				? right(escape('<DIR>'))
 				: right(mklink('Gimme!', 'Download as tarball',
 					"$full/$_.tar.gz", 'gimme')));
@@ -676,7 +683,7 @@ sub send_dir
 	# A little advertisement
 	$ad = para("Brought to you by",
 		mklink("Gimme!", 'Get the source', "/$GIMME", "gimmegimme"))
-		if !$isrobi;
+		unless !$Opt_gimme || $isrobi;
 
 	# Put all together.
 	$client->send_response(HTTP::Response->new(RC_OK, 'Okie',
@@ -809,10 +816,10 @@ sub main
 	} elsif (defined ($query = $r->url()->query()))
 	{	# Process special queries.
 		print " ($query)";
-		if ($query eq 'gimme')
+		if ($Opt_gimme && $query eq 'gimme')
 		{
 			send_tar($c, $path);
-		} elsif ($query eq 'gimmegimme')
+		} elsif ($Opt_gimme && $query eq 'gimmegimme')
 		{	# Send GIMME.
 			$c->send_response(HTTP::Response->new(
 				RC_OK, 'Nesze',
@@ -850,6 +857,7 @@ unless ($^S)
 		'p|port=i'		=> \$port,
 		'C|chroot!'		=> \$chroot,
 		'f|fork:i'		=> \$Opt_forking,
+		'gimme!'		=> \$Opt_gimme,
 	);
 
 	# Determine the directory to serve.
