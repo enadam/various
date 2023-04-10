@@ -33,10 +33,9 @@
 #
 # Having privileged stuff done Gimme changes its UIDs and GIDs to those
 # owning the executable, then goes to the background if requested with
-# --daemon.  SIGHUP makes Gimme re-execute itself, pleasing its developer
-# and uptime whores.  Access log is written to the standard output.
+# the --daemon flag.  Otherwise access log is written to the standard output.
 #
-# Gimme was written with public (but not wild) exposure in mind, so it is
+# Gimme was written with public (but not hostile) exposure in mind, so it is
 # thought to be relatively secure in the sense that it won't give away stuff
 # you didn't intend to share.  However, it can be DoS:ed and generally,
 # is not efficient with large files.
@@ -840,12 +839,73 @@ sub main
 }
 # >>>
 
-# Main starts here
-my $d;
+# Initialization <<<
+# Change the group membership, the real and effective UIDs and GIDs
+# to the owner of the program so that we can't regain root again.
+sub drop_privileges
+{
+	my $u = (stat(GIMME))[4];
+	($)) = "$u $u";
+	($(, $)) = ($u, $u);
+	($<, $>) = ($u, $u);
+	$( = $u;
+	$< = $u;
+}
 
-unless ($^S)
-{	# Initialization, needs to be done only once.
+# Go to the background by forking a grandchild.  Inspired by Proc::Daemon.
+sub daemonize
+{
+	my $pid;
+	local (*CHLD_IN, *CHLD_OUT);
+
+	# The grandchild will let the parent know through this pipe
+	# if it hatched successfully.
+	pipe(CHLD_IN, CHLD_OUT)
+		or die "pipe(): $!";
+
+	if (!defined ($pid = fork()))
+	{
+		die "fork(): $!";
+	} elsif ($pid)
+	{	# Parent process.  If the pipe is closed without anything
+		# being written to it, there was a problem.
+		close(CHLD_OUT);
+		defined ($pid = readline(CHLD_IN))
+			or exit 1;
+		print "Gimme has gone to the background as $pid";
+		exit;
+	} else
+	{	# Child process.  Detach from the parent's session.
+		close(CHLD_IN);
+		setsid() >= 0
+			or die "setsid(): $!";
+
+		if (!defined ($pid = fork()))
+		{
+			die "fork(): $!";
+		} elsif ($pid)
+		{	# The first child has no more duties.
+			exit;
+		}
+
+		# The grandchild process.
+		open(STDIN, '<', "/dev/null")
+			or die "/dev/null: $!";
+		open(STDOUT, '>', "/dev/null")
+			or die "/dev/null: $!";
+		open(STDERR, '>', "/dev/null")
+			or die "/dev/null: $!";
+
+		print CHLD_OUT "$$\n";
+		close(CHLD_OUT);
+	}
+}
+
+# Initialize the program.
+sub init
+{
 	my ($addr, $port, $chroot, $daemonize, $dir);
+	my $d;
 
 	# Parse the command line.
 	$addr = '127.0.0.1';
@@ -867,7 +927,7 @@ unless ($^S)
 		$dir = '.';
 	} elsif (@ARGV == 1)
 	{
-		$dir = shift;
+		$dir = shift(@ARGV);
 	} else
 	{
 		die "Too many arguments";
@@ -894,85 +954,25 @@ unless ($^S)
 		die "$dir: $!" unless chdir($dir);
 	}
 
-	# Drop privileges.
-	if ($> == 0)
-	{
-		# Change the group membership, the real and effective
-		# UIDs and GIDs to the owner of the program so that we
-		# can't regain root again.
-		my $u = (stat(GIMME))[4];
-		($)) = "$u $u";
-		($(, $)) = ($u, $u);
-		($<, $>) = ($u, $u);
-		$( = $u;
-		$< = $u;
-	}
+	# Drop privileges if started as root.
+	drop_privileges
+		if $> == 0;
 
-	# Go to the background by forking a grandchild.
-	if ($daemonize)
-	{
-		my $pid;
-		local (*CHLD_IN, *CHLD_OUT);
+	daemonize()
+		if $daemonize;
 
-		# The grandchild will let the parent know through this pipe
-		# if it grew up successfully.
-		pipe(CHLD_IN, CHLD_OUT)
-			or die "pipe(): $!";
+	$| = 1;
+	$SIG{'PIPE'} = 'IGNORE';
+	$SIG{'CHLD'} = \&child_exited
+		if defined $Opt_forking;
 
-		if (!defined ($pid = fork()))
-		{
-			die "fork(): $!";
-		} elsif ($pid)
-		{	# Parent process.  If the pipe is closed without
-			# anything being written to it, there was a problem.
-			close(CHLD_OUT);
-			defined ($pid = readline(CHLD_IN))
-				or exit 1;
-			print "Gimme has gone to the background as $pid";
-			exit;
-		} else
-		{	# Child process.  Detach from the parent's session.
-			close(CHLD_IN);
-			setsid() >= 0
-				or die "setsid(): $!";
-
-			if (!defined ($pid = fork()))
-			{
-				die "fork(): $!";
-			} elsif ($pid)
-			{	# The first child has no more duties.
-				exit;
-			}
-
-			# The grandchild process.
-			open(STDIN, '<', "/dev/null")
-				or die "/dev/null: $!";
-			open(STDOUT, '>', "/dev/null")
-				or die "/dev/null: $!";
-			open(STDERR, '>', "/dev/null")
-				or die "/dev/null: $!";
-
-			print CHLD_OUT "$$\n";
-			close(CHLD_OUT);
-		}
-	}
+	return $d;
 }
-
-$| = 1;
-$SIG{'PIPE'} = 'IGNORE';
-$SIG{'HUP'} = sub
-{	# Re-execute ourselves.
-	no warnings 'redefine';
-	local $/ = undef;
-	eval <GIMME>;
-	seek(GIMME, 0, 0);
-	die "gimme decides to die";
-};
-$SIG{'CHLD'} = \&child_exited
-	if defined $Opt_forking;
+# >>>
 
 # Spin the main loop.
-eval { main($d) } or not $@ or print $@ until $^S;
+my $d = init();
+main($d) while 1;
 
 # vim: set foldmethod=marker foldmarker=<<<,>>>:
 # End of gimme.pl
