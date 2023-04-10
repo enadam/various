@@ -7,7 +7,7 @@
 #
 # Synopsis:
 #   gimme.pl [--open|--listen <address>] [--port <port>] [--chroot]
-#            [--fork [<max-procs>]] [--nogimme] [<dir>]
+#            [--daemon] [--fork [<max-procs>]] [--nogimme] [<dir>]
 #
 # <address> is the one to listen on, defaulting to localhost.  Use --open
 # to make the service available on all interfaces.  By default the port
@@ -32,9 +32,9 @@
 # others require in run-time.  We're doing our best, though.
 #
 # Having privileged stuff done Gimme changes its UIDs and GIDs to those
-# owning the executable.  SIGHUP makes Gimme re-execute itself, pleasing
-# its developer and uptime whores.  Access log is written to the standard
-# output.
+# owning the executable, then goes to the background if requested with
+# --daemon.  SIGHUP makes Gimme re-execute itself, pleasing its developer
+# and uptime whores.  Access log is written to the standard output.
 #
 # Gimme was written with public (but not wild) exposure in mind, so it is
 # thought to be relatively secure in the sense that it won't give away stuff
@@ -349,7 +349,7 @@ sub send_file_response
 package main;
 use strict;
 use Getopt::Long;
-use POSIX qw(uname WNOHANG);
+use POSIX qw(uname setsid WNOHANG);
 use Errno qw(ENOENT ENOTDIR EPERM EACCES);
 use HTTP::Daemon;
 use HTTP::Status;
@@ -845,7 +845,7 @@ my $d;
 
 unless ($^S)
 {	# Initialization, needs to be done only once.
-	my ($addr, $port, $chroot, $dir);
+	my ($addr, $port, $chroot, $daemonize, $dir);
 
 	# Parse the command line.
 	$addr = '127.0.0.1';
@@ -856,6 +856,7 @@ unless ($^S)
 		'i|listen=s'		=> \$addr,
 		'p|port=i'		=> \$port,
 		'C|chroot!'		=> \$chroot,
+		'D|daemon!'		=> \$daemonize,
 		'f|fork:i'		=> \$Opt_forking,
 		'gimme!'		=> \$Opt_gimme,
 	);
@@ -905,6 +906,55 @@ unless ($^S)
 		($<, $>) = ($u, $u);
 		$( = $u;
 		$< = $u;
+	}
+
+	# Go to the background by forking a grandchild.
+	if ($daemonize)
+	{
+		my $pid;
+		local (*CHLD_IN, *CHLD_OUT);
+
+		# The grandchild will let the parent know through this pipe
+		# if it grew up successfully.
+		pipe(CHLD_IN, CHLD_OUT)
+			or die "pipe(): $!";
+
+		if (!defined ($pid = fork()))
+		{
+			die "fork(): $!";
+		} elsif ($pid)
+		{	# Parent process.  If the pipe is closed without
+			# anything being written to it, there was a problem.
+			close(CHLD_OUT);
+			defined ($pid = readline(CHLD_IN))
+				or exit 1;
+			print "Gimme has gone to the background as $pid";
+			exit;
+		} else
+		{	# Child process.  Detach from the parent's session.
+			close(CHLD_IN);
+			setsid() >= 0
+				or die "setsid(): $!";
+
+			if (!defined ($pid = fork()))
+			{
+				die "fork(): $!";
+			} elsif ($pid)
+			{	# The first child has no more duties.
+				exit;
+			}
+
+			# The grandchild process.
+			open(STDIN, '<', "/dev/null")
+				or die "/dev/null: $!";
+			open(STDOUT, '>', "/dev/null")
+				or die "/dev/null: $!";
+			open(STDERR, '>', "/dev/null")
+				or die "/dev/null: $!";
+
+			print CHLD_OUT "$$\n";
+			close(CHLD_OUT);
+		}
 	}
 }
 
