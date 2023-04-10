@@ -6,10 +6,10 @@
 # The exported directories will be browseable and downloadable as tarballs.
 #
 # Synopsis:
-# ./gimme.pl [-C] [--fork[=<max-procs>]] [<address> | <dir>]
-# ./gimme.pl [-C] [--fork[=<max-procs>]]  <address>   <dir>
+#   gimme.pl [--open|--listen <address>] [--port <port>] [--chroot]
+#            [--fork [<max-procs>]] [<dir>]
 #
-# <address> is the one to listen on, defaulting to localhost.  Use "all"
+# <address> is the one to listen on, defaulting to localhost.  Use --open
 # to make the service available on all interfaces.  By default the port
 # is 80 if started as root, otherwise it's 8080.
 #
@@ -25,11 +25,11 @@
 # until <max-procs> is reached, then requests are served sequentially.
 # If <max-procs> is omitted or 0 no such limit is imposed.
 #
-# If the -C flag is present Gimme chroot()s to <dir>.  This will disable
-# directory downloading unless you make tar(1) available in the chroot.
-# Generally speaking, the chrooted mode may be quite fragile because
-# it is hard to predict what kind of modules will LWP and the others
-# require in run-time.  We're doing our best, though.
+# If the --chroot flag is present Gimme chroot()s to <dir>.  This will
+# disable directory downloading unless you make tar(1) available in the
+# chroot.  Generally speaking, the chrooted mode may be quite fragile
+# because it is hard to predict what kind of modules will LWP and the
+# others require in run-time.  We're doing our best, though.
 #
 # Having privileged stuff done Gimme changes its UIDs and GIDs to those
 # owning the executable.  SIGHUP makes Gimme re-execute itself, pleasing
@@ -348,6 +348,7 @@ sub send_file_response
 
 package main;
 use strict;
+use Getopt::Long;
 use POSIX qw(uname WNOHANG);
 use Errno qw(ENOENT ENOTDIR EPERM EACCES);
 use HTTP::Daemon;
@@ -837,29 +838,30 @@ my $d;
 
 unless ($^S)
 {	# Initialization, needs to be done only once.
-	my ($chroot, $addr, $port, $dir);
+	my ($addr, $port, $chroot, $dir);
 
 	# Parse the command line.
 	$addr = '127.0.0.1';
 	$port = $> == 0 ? 80 : 8080;
-	$dir  = '.';
+	Getopt::Long::Configure(qw(gnu_getopt));
+	exit(1) unless GetOptions(
+		'a|open'		=> sub { undef $addr },
+		'i|listen=s'		=> \$addr,
+		'p|port=i'		=> \$port,
+		'C|chroot!'		=> \$chroot,
+		'f|fork:i'		=> \$Opt_forking,
+	);
 
-	@ARGV && $ARGV[0] eq '-C'
-		and $chroot = 1
-		and shift;
-
-	if (@ARGV && $ARGV[0] =~ /^--fork(?:=(\d+))?$/)
+	# Determine the directory to serve.
+	if (!@ARGV)
 	{
-		$Opt_forking = $1 || 0;
-		shift;
-	}
-
-	if (@ARGV == 1)
+		$dir = '.';
+	} elsif (@ARGV == 1)
 	{
-		-d $ARGV[0] ? $dir : $addr = $ARGV[0];
-	} elsif (@ARGV >= 2)
+		$dir = shift;
+	} else
 	{
-		($addr, $dir) = @ARGV;
+		die "Too many arguments";
 	}
 
 	# Keep ourselves open for gimmegimme.
@@ -867,7 +869,7 @@ unless ($^S)
 
 	# Do possibly privileged stuff.
 	defined ($d = HTTP::Daemon->new(
-			LocalAddr => $addr eq 'all' ? '0.0.0.0' : $addr,
+			LocalAddr => $addr // '0.0.0.0',
 			LocalPort => $port,
 			ReuseAddr => 1))
 		or die "$!";
