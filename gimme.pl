@@ -348,7 +348,7 @@ sub send_file_response
 
 package main;
 use strict;
-use POSIX qw(WNOHANG);
+use POSIX qw(uname WNOHANG);
 use Errno qw(ENOENT ENOTDIR EPERM EACCES);
 use HTTP::Daemon;
 use HTTP::Status;
@@ -362,7 +362,7 @@ my $GIMME = $0;
 $GIMME =~ s!^.*/+!!;
 
 # Default file name of the .tgz of the site.
-my $SITE = `hostname`;
+my (undef, $SITE) = uname();
 chomp($SITE);
 
 # Don't tire these user agents with navigation bar or advertisement.
