@@ -633,7 +633,7 @@ sub send_dir
 	# Creare the directory @list.
 	while (<\Q$path\E/*>)
 	{
-		my (@row, $link, $full);
+		my ($link, $entry);
 
 		$link = readlink($_);
 		stat($_)
@@ -641,50 +641,68 @@ sub send_dir
 			or next;
 
 		s!^.*/+!!;
-		$full = $location->new($_);
-
-		push(@row, int((time - (stat(_))[9]) / (24*60*60)));
+		push(@list, $entry =
+		{
+			fname	=> $_,
+			symlink	=> $link,
+			age	=> int((time - (stat(_))[9]) / (24*60*60)),
+	       	});
 
 		if (-f _)
-		{	# Regular file, show its size.
-			push(@row, right((stat(_))[7] . 'B'));
+		{
+			$$entry{'size'} = (stat(_))[7];
 		} elsif (-d _)
-		{	# Directory, give a download link unless the client
-			# $isrobi.
-			push(@row, !$Opt_gimme || $isrobi
-				? right(escape('<DIR>'))
-				: right(mklink('Gimme!', 'Download as tarball',
-					"$full/$_.tar.gz", 'gimme')));
+		{
+			$$entry{'is_dir'} = 1;
+		}
+	}
+
+	# Sort by age, format the columns and create the table.
+	$list = table(map({
+		my @row;
+
+		my $age = $$_{'age'};
+		my $red = $age <= 30 ? int(-255/30*$age + 255) : 0;
+		push(@row, right(color(($red, 0, 0),
+				$age <= 1 ? "${age}day" : "${age}days")));
+
+		# Add the size column or download link.
+		my $fname = $$_{'fname'};
+		my $full = $location->new($fname);
+		if (defined $$_{'size'})
+		{
+			push(@row, right("$$_{'size'}B"));
+		} elsif ($$_{'is_dir'})
+		{
+			if (!$Opt_gimme || $isrobi)
+			{
+				push(@row, right(escape('<DIR>')));
+			} else
+			{
+				push(@row, right(mklink(
+					'Gimme!', 'Download as tarball',
+					"$full/$fname.tar.gz", 'gimme')));
+			}
 		} else
-		{	# Something else, just leave it empty.
+		{	# Neither a file or a directory.
 			push(@row, cell(''));
 		}
 
+		my $link = $$_{'symlink'};
 		push(@row, cell(mklink(
-				defined $link ? "$_ -> $link" : $_, undef,
-				$full)));
+				defined $link ? "$fname -> $link" : $fname,
+				undef, $full)));
+		push(@row, cell($$index{$fname} // ''));
 
-		push(@row, cell(exists $$index{$_} ? $$index{$_} : ''));
-		push(@list, \@row);
-	}
+		row(join('', @row));
+	} sort({ $$a{'age'} <=> $$b{'age'} } @list)));
 
-	# Sort by age, format the age column and create the table.
-	$list = table(map(row(join('',
-			right(color(
-				$$_[0] <= 30
-					? int(-255/30*$$_[0] + 255)
-					: 0,
-				0, 0,
-				$$_[0] <= 1 ? "$$_[0]day" : "$$_[0]days")),
-			@$_[1..$#$_])),
-		sort({ $$a[0] <=> $$b[0] } @list)));
-
-	# A little advertisement
+	# A little advertisement.
 	$ad = para("Brought to you by",
 		mklink("Gimme!", 'Get the source', "/$GIMME", "gimmegimme"))
 		unless !$Opt_gimme || $isrobi;
 
-	# Put all together.
+	# Put it all together.
 	$client->send_response(HTTP::Response->new(RC_OK, 'Okie',
 		[ 'Content-Type' => 'text/html' ],
 		html($location, grep(defined,
