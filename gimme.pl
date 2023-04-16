@@ -42,8 +42,8 @@
 #
 # Special files:
 # -- If the requested path is a directory and there is not a .dirlist
-#    file therein, the directory's contents are listed, sorted by last
-#    modification time.  Unless disabled with --nogimme, there will be
+#    file therein, the directory's contents are listed, sorted according to
+#    the --sort-by-* flags.  Unless disabled with --nogimme, there will be
 #    "Gimme!" links for directories that let clients download them in a
 #    single .tar archive.  (This capability was the primary motivation
 #    for this program.) When creating a tarball symlinks are not followed.
@@ -348,6 +348,7 @@ sub send_file_response
 package main;
 use strict;
 use Getopt::Long;
+use Scalar::Util;
 use POSIX qw(uname setsid WNOHANG);
 use Errno qw(ENOENT ENOTDIR EPERM EACCES);
 use HTTP::Daemon;
@@ -370,6 +371,9 @@ my $ROBOTS = qr/\b(?:wget|googlebot)\b/i;
 
 # Display and serve Gimme! links?
 my $Opt_gimme = 1;
+
+# Order of files in a dirlist.
+my $Opt_dirlist_order = 'fname';
 
 # Value of the --fork option.
 my $Opt_forking;
@@ -677,7 +681,7 @@ sub send_dir
 		}
 	}
 
-	# Sort by age, format the columns and create the table.
+	# Sort by $Opt_dirlist_order, format the columns and create the table.
 	$list = table(map({
 		my @row;
 
@@ -720,7 +724,13 @@ sub send_dir
 		push(@row, cell($$index{$fname} // ''));
 
 		row(join('', @row));
-	} sort({ $$a{'age'} <=> $$b{'age'} } @list)));
+	} sort({
+		my $lhs = $$a{$Opt_dirlist_order};
+		my $rhs = $$b{$Opt_dirlist_order};
+		Scalar::Util::looks_like_number($lhs)
+			? $lhs <=> $rhs
+			: $lhs cmp $rhs;
+	} @list)));
 
 	# A little advertisement.
 	$ad = para("Brought to you by",
@@ -962,6 +972,14 @@ sub init
 		'D|daemon!'		=> \$daemonize,
 		'f|fork:i'		=> \$Opt_forking,
 		'gimme!'		=> \$Opt_gimme,
+		'sort-by-name'		=> sub
+		{
+			$Opt_dirlist_order = 'fname';
+		},
+		'sort-by-age'		=> sub
+		{
+			$Opt_dirlist_order = 'age';
+		},
 	);
 
 	# Determine the directory to serve.
