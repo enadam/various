@@ -560,6 +560,26 @@ sub get_index
 	return \%index;
 }
 
+# Return $size as "$size XiB" or undef if $size is less than a KiB.
+sub humanize_size
+{
+	my $size = shift;
+
+	for my $prefix (qw(B KiB MiB GiB TiB PiB EiB))
+	{
+		if ($size >= 1024)
+		{
+			$size /= 1024;
+		} elsif ($prefix eq 'B')
+		{
+			return undef;
+		} else
+		{
+			return sprintf('%.2f %s', $size, $prefix);
+		}
+	}
+}
+
 sub send_dir
 {
 	my ($client, $request, $path) = @_;
@@ -671,9 +691,14 @@ sub send_dir
 		my $full = $location->new($fname);
 		if (defined $$_{'size'})
 		{
-			push(@row, right("$$_{'size'}B"));
+			my $size = $$_{'size'};
+			my $human = humanize_size($size);
+			push(@row, defined $human
+				? (right($human), right("($size B)"))
+				: (right("$size B"), cell('')));
 		} elsif ($$_{'is_dir'})
 		{
+			push(@row, cell(''));
 			if (!$Opt_gimme || $isrobi)
 			{
 				push(@row, right(escape('<DIR>')));
@@ -685,7 +710,7 @@ sub send_dir
 			}
 		} else
 		{	# Neither a file or a directory.
-			push(@row, cell(''));
+			push(@row, cell(''), cell(''));
 		}
 
 		my $link = $$_{'symlink'};
