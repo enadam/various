@@ -206,9 +206,8 @@ sub send_file_response
 	$fname = $fname->as_string();
 
 	if (!open(FH, '<', $fname))
-	{
-		return $self->send_error(RC_FORBIDDEN)
-			if $! == EACCES;
+	{	# check_path() has verified we should have read access,
+		# so it's something else.
 		warn "$fname: $!";
 		return $self->send_error(RC_INTERNAL_SERVER_ERROR);
 	}
@@ -452,6 +451,10 @@ sub in_subprocess
 		}
 	}
 
+	# Reset the warn hook set by main() if in a subprocess.
+	!defined $child || $child
+		or undef $SIG{'__WARN__'};
+
 	# Call $fun() if didn't fork() or we're the child.
 	# Then exit if we're the child.
 	&$fun() if !defined $child || !$child;
@@ -475,7 +478,14 @@ sub read_chunk
 	my $fh = shift;
 	my $buf;
 
-	return read($fh, $buf, 4096) ? $buf : undef;
+	if (!defined read($fh, $buf, 4096))
+	{
+		warn "tar: $!";
+		return undef;
+	} else
+	{
+		return $buf;
+	}
 }
 
 sub check_path
@@ -486,40 +496,37 @@ sub check_path
 	{
 		if (-f _)
 		{
-			return 1 if -r _;
+			return RC_OK if -r _;
 		} elsif (-d _)
 		{
-			return 1 if -r _ && -x _;
+			return RC_OK if -r _ && -x _;
 		}
-		$client->send_error(RC_FORBIDDEN)
+		return $client->send_error(RC_FORBIDDEN)
 	} elsif ($! == ENOENT || $! == ENOTDIR)
 	{
-		$client->send_error(RC_NOT_FOUND);
+		return $client->send_error(RC_NOT_FOUND);
 	} elsif ($! == EPERM || $! == EACCES)
 	{
-		$client->send_error(RC_FORBIDDEN);
+		return $client->send_error(RC_FORBIDDEN);
 	} else
 	{
-		$client->send_error(RC_INTERNAL_SERVER_ERROR);
+		warn "$path: $!";
+		return $client->send_error(RC_INTERNAL_SERVER_ERROR);
 	}
-	return 0;
 }
 
 sub send_tar
 {
 	my ($client, $path) = @_;
-	my $dir;
+	my ($rc, $dir);
 	local *TAR;
 
 	# The last component is expected to be the suggested file name.
 	$path->pop();
-	check_path($client, $path)
-		or return;
-	if (! -d _)
-	{
-		$client->send_error(RC_NOT_FOUND);
-		return;
-	}
+	($rc = check_path($client, $path)) == RC_OK
+		or return $rc;
+	return $client->send_error(RC_NOT_FOUND)
+		if ! -d _;
 
 	# What to transform the initial '.' of the paths in the archive to.
 	# This should be the directory name we made the archive of or $SITE.
@@ -528,9 +535,13 @@ sub send_tar
 	$dir =~ s/!/\\!/g;
 
 	# Make tar(1) transform the path prefixes to $dir.
-	open(TAR, '-|', qw(tar cz), '-C', $path,
-		'--transform', "s!^\\.\$!$dir!;s!^\\./!$dir/!", '.')
-		or return $client->send_error(RC_SERVICE_UNAVAILABLE);
+	if (!open(TAR, '-|', qw(tar cz), '-C', $path,
+		'--transform', "s!^\\.\$!$dir!;s!^\\./!$dir/!", '.'))
+	{
+		warn "tar: $!";
+		return $client->send_error(RC_SERVICE_UNAVAILABLE);
+	}
+
 	in_subprocess(sub
 	{
 		$client->send_response(HTTP::Response->new(
@@ -538,6 +549,8 @@ sub send_tar
 			[ 'Content-Type' => 'application/x-tar' ],
 			sub { read_chunk(*TAR) }));
 	});
+
+	return RC_OK;
 }
 
 sub get_index
@@ -591,6 +604,7 @@ sub send_dir
 	my ($motd, $navi, @upper, @lower);
 	my (@list, $list, $ad);
 	my ($index, $desc);
+	local *MOTD;
 
 	# Is $client a robot?
 	$isrobi = defined ($ua = $request->header('User-Agent'))
@@ -742,6 +756,8 @@ sub send_dir
 		[ 'Content-Type' => 'text/html' ],
 		html($location, grep(defined,
 			($navi, $motd, $desc, $list, $ad)))));
+
+	return RC_OK;
 }
 # Functionality >>>
 
@@ -758,6 +774,7 @@ sub urldecode
 sub serve
 {
 	my ($c, $r, $path, $noauth) = @_;
+	my $rc;
 
 	unless ($noauth)
 	{
@@ -767,11 +784,12 @@ sub serve
 			my $dir = Path->new($path)->pop();
 			if (-f $dir->add(".htaccess")->as_string())
 			{
-				$c->send_basic_header(RC_UNAUTHORIZED);
+				$rc = RC_UNAUTHORIZED;
+				$c->send_basic_header($rc);
 				print $c "WWW-Authenticate: Basic realm=",
 					'"', $dir->as_string(), '"', "\r\n";
 				print $c "\r\n";
-				return;
+				return $rc;
 			}
 		} else
 		{
@@ -779,11 +797,11 @@ sub serve
 		}
 	}
 
-	check_path($c, $path)
-		or return;
+	($rc = check_path($c, $path)) == RC_OK
+		or return $rc;
 	if (-f _)
 	{
-		$c->send_file_response($path);
+		return $c->send_file_response($path);
 	} elsif (-d _)
 	{
 		my ($dirlist, $readlink);
@@ -804,41 +822,37 @@ sub serve
 			($list_dev, $list_ino) = stat($dirlist);
 			if (!defined $list_dev || !defined $list_ino)
 			{	# $dirlist is a dangling symlink.
-				print " (.dirlist ENOENT)";
-				$c->send_error(RC_INTERNAL_SERVER_ERROR);
-				return;
+				warn "$dirlist: ENOENT";
+				return $c->send_error(RC_INTERNAL_SERVER_ERROR);
 			}
 			if ($list_dev == $path_dev && $list_ino == $path_ino)
 			{
-				print " (.dirlist ELOOP)";
-				$c->send_error(RC_INTERNAL_SERVER_ERROR);
-				return;
+				warn "$dirlist: ELOOP";
+				return $c->send_error(RC_INTERNAL_SERVER_ERROR);
 			} elsif (-d _)
 			{	# $dirlist points to a directory.
-				send_dir($c, $r, $dirlist);
-				return;
+				return send_dir($c, $r, $dirlist);
 			}
 
 			$readlink = Path->new($readlink);
 			if ($readlink->is_absolute())
 			{
-				serve($c, $r, $readlink, 1);
+				return serve($c, $r, $readlink, 1);
 			} else
 			{
 				$path->add(@$readlink);
-				serve($c, $r, $path, 1);
+				return serve($c, $r, $path, 1);
 			}
 		} elsif (-e $dirlist)
 		{
-			serve($c, $r, $dirlist, 1);
+			return serve($c, $r, $dirlist, 1);
 		} else
 		{
-			send_dir($c, $r, $path);
+			return send_dir($c, $r, $path);
 		}
 	} else
-	{	# Special file, can't send it.
-		print " (special file)";
-		$c->send_error(RC_BAD_REQUEST);
+	{	# Special file, should have been caught by check_path().
+		return $c->send_error(RC_BAD_REQUEST);
 	}
 }
 
@@ -846,12 +860,17 @@ sub serve
 sub main
 {
 	my $d = shift;
-	my ($c, $r, $path, $query);
+	my ($c, $r, $path, $query, $rc);
+	my @warnings;
 
 	# Be fair to everyone and allow one request per connection.
 	$c = $d->accept('GoodByeClient') until defined $c;
 	defined ($r = $c->get_request())
 		or return;
+
+	# Buffer warnings until the end of request processing,
+	# when we can print them clearly.
+	local $SIG{'__WARN__'} = sub { push(@warnings, $_[0]) };
 
 	$path = urldecode($r->url()->path());
 	print ~~localtime(), " ", $c->peerhost(),
@@ -859,18 +878,16 @@ sub main
 	$path = Path->new($path)->as_relative();
 	if ($r->method() ne 'GET')
 	{	# Filter out junk.
-		print " (junk)";
-		$c->send_error(RC_METHOD_NOT_ALLOWED);
+		$rc = $c->send_error(RC_METHOD_NOT_ALLOWED);
 	} elsif (grep($_ eq '..', @$path))
 	{	# Filter out malice.
-		print " (forbjuden)";
-		$c->send_error(RC_FORBIDDEN);
+		$rc = $c->send_error(RC_FORBIDDEN);
 	} elsif (defined ($query = $r->url()->query()))
 	{	# Process special queries.
 		print " ($query)";
 		if ($Opt_gimme && $query eq 'gimme')
 		{
-			send_tar($c, $path);
+			$rc = send_tar($c, $path);
 		} elsif ($Opt_gimme && $query eq 'gimmegimme')
 		{	# Send GIMME.
 			$c->send_response(HTTP::Response->new(
@@ -878,17 +895,25 @@ sub main
 				[ 'Content-Type' => 'text/x-perl' ],
 				sub { read_chunk(*GIMME) }));
 			seek(GIMME, 0, 0);
+			$rc = RC_OK;
 		} else
-		{	# Ignore $qeury.
-			serve($c, $r, $path);
+		{	# Ignore $query.
+			$rc = serve($c, $r, $path);
 		}
 	} else
 	{
-		serve($c, $r, $path);
+		$rc = serve($c, $r, $path);
 	}
+	$c->close();
+
+	# Log the fate of the request if not successful.
+	print " (", HTTP::Status::status_message($rc), ")"
+		if $rc != RC_OK;
 	print "\n";
 
-	$c->close();
+	# The logline is complete now, we can log the warnings.
+	print STDERR "  ", $_
+		for @warnings;
 }
 # >>>
 
