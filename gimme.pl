@@ -338,9 +338,13 @@ sub send_file_response
 		print $self "\r\n";
 	}
 
-	main::in_subprocess(sub { $self->send_file(\*FH) })
-		unless $self->head_request();
-	return RC_OK;
+	return $self->head_request()
+		? RC_OK
+		: main::in_subprocess(sub
+		{
+			$self->send_file(\*FH);
+			return RC_OK;
+		});
 }
 # >>>
 
@@ -451,14 +455,18 @@ sub in_subprocess
 		}
 	}
 
-	# Reset the warn hook set by main() if in a subprocess.
-	!defined $child || $child
-		or undef $SIG{'__WARN__'};
-
-	# Call $fun() if didn't fork() or we're the child.
-	# Then exit if we're the child.
-	&$fun() if !defined $child || !$child;
-	exit 0  if  defined $child && !$child;
+	if (!defined $child)
+	{	# We didn't fork().
+		return $fun->();
+	} elsif (!$child)
+	{	# We're in the subprocess.
+		undef $SIG{'__WARN__'};
+		$fun->();
+		exit 0;
+	} else
+	{	# We're the parent.
+		return RC_OK;
+	}
 }
 
 # The SIGCHLD handler if $Opt_forking.
@@ -518,8 +526,7 @@ sub check_path
 sub send_tar
 {
 	my ($client, $path) = @_;
-	my ($rc, $dir);
-	local *TAR;
+	my $rc;
 
 	# The last component is expected to be the suggested file name.
 	$path->pop();
@@ -528,31 +535,35 @@ sub send_tar
 	return $client->send_error(RC_NOT_FOUND)
 		if ! -d _;
 
-	# What to transform the initial '.' of the paths in the archive to.
-	# This should be the directory name we made the archive of or $SITE.
-	$dir = $path->dirs() ? $$path[-1] : $SITE;
-	$dir =~ s/\\/\\\\/g;
-	$dir =~ s/!/\\!/g;
-
-	# Start tar(1) and make it transform the path prefixes to $dir if we
-	# are serving the body of the response.
-	if (!$client->head_request() && !open(TAR, '-|',
-		qw(tar cz), '-C', $path,
-		'--transform', "s!^\\.\$!$dir!;s!^\\./!$dir/!", '.'))
+	return in_subprocess(sub
 	{
-		warn "tar: $!";
-		return $client->send_error(RC_SERVICE_UNAVAILABLE);
-	}
+		my $dir;
+		local *TAR;
 
-	in_subprocess(sub
-	{
+		# What to transform the initial '.' of the paths in the archive
+		# to.  This should be the directory name we made the archive of
+		# or $SITE.
+		$dir = $path->dirs() ? $$path[-1] : $SITE;
+		$dir =~ s/\\/\\\\/g;
+		$dir =~ s/!/\\!/g;
+
+		# Start tar(1) and make it transform the path prefixes to $dir
+		# if we are serving the body of the response.
+		if (!$client->head_request() && !open(TAR, '-|',
+			qw(tar cz), '-C', $path,
+			'--transform', "s!^\\.\$!$dir!;s!^\\./!$dir/!", '.'))
+		{
+			warn "tar: $!";
+			return $client->send_error(RC_SERVICE_UNAVAILABLE);
+		}
+
 		$client->send_response(HTTP::Response->new(
 			RC_OK, 'Here you go',
 			[ 'Content-Type' => 'application/x-tar' ],
 			sub { read_chunk(*TAR) }));
-	});
 
-	return RC_OK;
+		return RC_OK;
+	});
 }
 
 sub get_index
