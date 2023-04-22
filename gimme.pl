@@ -534,8 +534,10 @@ sub send_tar
 	$dir =~ s/\\/\\\\/g;
 	$dir =~ s/!/\\!/g;
 
-	# Make tar(1) transform the path prefixes to $dir.
-	if (!open(TAR, '-|', qw(tar cz), '-C', $path,
+	# Start tar(1) and make it transform the path prefixes to $dir if we
+	# are serving the body of the response.
+	if (!$client->head_request() && !open(TAR, '-|',
+		qw(tar cz), '-C', $path,
 		'--transform', "s!^\\.\$!$dir!;s!^\\./!$dir/!", '.'))
 	{
 		warn "tar: $!";
@@ -876,7 +878,7 @@ sub main
 	print ~~localtime(), " ", $c->peerhost(),
 		": ", $r->method(), ": ", $path;
 	$path = Path->new($path)->as_relative();
-	if ($r->method() ne 'GET')
+	if (!grep($r->method() eq $_, "HEAD", "GET"))
 	{	# Filter out junk.
 		$rc = $c->send_error(RC_METHOD_NOT_ALLOWED);
 	} elsif (grep($_ eq '..', @$path))
