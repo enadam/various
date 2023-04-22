@@ -174,6 +174,79 @@ sub absolutely_clear
 }
 # End of module Path >>>
 
+# Download progress indicator.
+package Progressometer; # <<<
+use strict;
+
+# Log completion percentages at this intervals.
+my $CHECKPOINT_SECS = 5;
+
+sub new
+{
+	my ($class, $peer, $fname, $fsize) = @_;
+	return bless({
+		peer		=> $peer,
+		fname		=> $fname,
+		fsize		=> $fsize,
+		read		=> 0,
+		checkpointed	=> undef,
+		next_checkpoint	=> time() + $CHECKPOINT_SECS,
+	}, ref $class || $class);
+}
+
+# Tell the Progressometer that $read bytes have been or is about to be sent
+# to the client or that the end of stream has been reached, in which case a
+# final update is made.
+sub update
+{
+	my ($this, $read) = @_;
+
+	$$this{'read'} += $read
+		if defined $read;
+
+	# Show the progress if it's an intermediate update and enough time
+	# has elapsed since the last one or if it's a final update which is
+	# different from the previous one.
+	my $now = time();
+	if (defined $read
+		? $now >= $$this{'next_checkpoint'}
+		: (!defined $$this{'checkpointed'}
+			|| $$this{'checkpointed'} < $$this{'read'}))
+	{
+		my $progress;
+
+		# The progress is either displayed as a percentage if the full
+		# expected size is known or as a byte counter.
+		if ($$this{'fsize'})
+		{
+			$progress = sprintf('%d%%',
+				int(100 * $$this{'read'} / $$this{'fsize'}));
+		} elsif (defined $$this{'fsize'} && !$$this{'read'})
+		{	# Read 0 bytes of 0.
+			$progress = "100%";
+		} else
+		{
+			$progress = main::humanize_size($$this{'read'})
+						// "$$this{'read'} B";
+		}
+
+		if (!defined $SIG{'__WARN__'})
+		{	# We're in a subprocess, log a complete line.
+			print	~~localtime($now), " ",
+				$$this{'peer'}, ": ", $$this{'fname'}, ": ",
+				$progress, "\n";
+		} else
+		{
+			print defined $$this{'checkpointed'}
+				? ", " : ": ", $progress;
+		}
+
+		$$this{'checkpointed'} = $$this{'read'};
+		$$this{'next_checkpoint'} = $now + $CHECKPOINT_SECS;
+	}
+}
+# >>>
+
 # Override HTTP::Daemon::ClientConn.
 package GoodByeClient; # <<<
 
@@ -191,6 +264,36 @@ sub send_basic_header
 	my $self = shift;
 	$self->SUPER::send_basic_header(@_);
 	print $self "Connection: close\r\n";
+}
+
+sub send_file
+{
+	my ($self, $fh, $fname) = @_;
+
+	my $progress = Progressometer->new($self->peerhost(), $fname,
+						(stat($fh))[7]);
+	for (;;)
+	{
+		my ($n, $buf);
+
+		# Read and forward $fh.
+		if (!defined ($n = read($fh, $buf, 8*1024)))
+		{
+			warn "$fname: $!";
+			return;
+		} elsif ($n == 0)
+		{	# End of file.
+			$progress->update();
+			last;
+		} elsif (!print $self $buf)
+		{
+			warn $self->peerhost(), ": ", "$!";
+			return;
+		} else
+		{
+			$progress->update($n);
+		}
+	}
 }
 
 # Send custom .headers along with the file response.
@@ -342,7 +445,7 @@ sub send_file_response
 		? RC_OK
 		: main::in_subprocess(sub
 		{
-			$self->send_file(\*FH);
+			$self->send_file(\*FH, $fname);
 			return RC_OK;
 		});
 }
@@ -483,7 +586,7 @@ sub child_exited
 # Functionality <<<
 sub read_chunk
 {
-	my $fh = shift;
+	my ($fh, $progress) = @_;
 	my $buf;
 
 	if (!defined read($fh, $buf, 4096))
@@ -491,7 +594,9 @@ sub read_chunk
 		warn "tar: $!";
 		return undef;
 	} else
-	{
+	{	# If $buf is empty we've reached the end of file.
+		$progress->update(length($buf) || undef)
+			if defined $progress;
 		return $buf;
 	}
 }
@@ -537,7 +642,7 @@ sub send_tar
 
 	return in_subprocess(sub
 	{
-		my $dir;
+		my ($dir, $progress);
 		local *TAR;
 
 		# What to transform the initial '.' of the paths in the archive
@@ -557,10 +662,11 @@ sub send_tar
 			return $client->send_error(RC_SERVICE_UNAVAILABLE);
 		}
 
+		$progress = Progressometer->new($client->peerhost(), $path);
 		$client->send_response(HTTP::Response->new(
 			RC_OK, 'Here you go',
 			[ 'Content-Type' => 'application/x-tar' ],
-			sub { read_chunk(*TAR) }));
+			sub { read_chunk(*TAR, $progress) }));
 
 		return RC_OK;
 	});
