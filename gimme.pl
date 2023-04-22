@@ -662,11 +662,14 @@ sub send_tar
 			return $client->send_error(RC_SERVICE_UNAVAILABLE);
 		}
 
+		# Stop spending cycles as soon as the client hangs up.
+		my $sigpipe;
+		local $SIG{'PIPE'} = sub { $sigpipe = 1 };
 		$progress = Progressometer->new($client->peerhost(), $path);
 		$client->send_response(HTTP::Response->new(
 			RC_OK, 'Here you go',
 			[ 'Content-Type' => 'application/x-tar' ],
-			sub { read_chunk(*TAR, $progress) }));
+			sub { $sigpipe ? "" : read_chunk(*TAR, $progress) }));
 
 		return RC_OK;
 	});
