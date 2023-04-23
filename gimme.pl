@@ -49,9 +49,7 @@
 #    for this program.) When creating a tarball symlinks are not followed.
 #    These and other navigation links are not presented to robots.
 # -- If a .dirlist file is present in the directory, its contents are
-#    returned as the directory listing.  .dirlist can also be a symlink
-#    pointing to another file or directory, in which case the target
-#    is returned to the client.
+#    returned as the directory listing.
 # -- .dotfiles are not shown in directory listings, but they remain
 #    accessible by addressing them directly, so they are still public.
 # -- 00INDEX is a series of <file-name> <description> mappings, each
@@ -456,7 +454,7 @@ use strict;
 use Getopt::Long;
 use Scalar::Util;
 use POSIX qw(uname setsid WNOHANG);
-use Errno qw(ENOENT ENOTDIR EPERM EACCES);
+use Errno qw(ENOENT ENOTDIR EISDIR EPERM EACCES);
 use HTTP::Daemon;
 use HTTP::Status;
 
@@ -895,83 +893,49 @@ sub urldecode
 # Serve $path if we can.
 sub serve
 {
-	my ($c, $r, $path, $noauth) = @_;
-	my $rc;
+	my ($c, $r, $path) = @_;
+	my ($dirlist, $rc);
 
-	unless ($noauth)
+	my $authorization = $r->header("Authorization");
+	if (!defined $authorization)
 	{
-		my $authorization = $r->header("Authorization");
-		if (!defined $authorization)
+		my $dir = Path->new($path)->pop();
+		if (-f $dir->add(".htaccess")->as_string())
 		{
-			my $dir = Path->new($path)->pop();
-			if (-f $dir->add(".htaccess")->as_string())
-			{
-				$rc = RC_UNAUTHORIZED;
-				$c->send_basic_header($rc);
-				print $c "WWW-Authenticate: Basic realm=",
-					'"', $dir->as_string(), '"', "\r\n";
-				print $c "\r\n";
-				return $rc;
-			}
-		} else
-		{
-			print " (Authorization: $authorization)"
+			$rc = RC_UNAUTHORIZED;
+			$c->send_basic_header($rc);
+			print $c "WWW-Authenticate: Basic realm=",
+				'"', $dir->as_string(), '"', "\r\n";
+			print $c "\r\n";
+			return $rc;
 		}
+	} else
+	{
+		print " (Authorization: $authorization)"
 	}
 
-	($rc = check_path($c, $path)) == RC_OK
-		or return $rc;
-	if (-f _)
+	# Is there a .dirlist file in $path?
+	lstat($dirlist = $path->new()->add(".dirlist"));
+	if (-e _)
+	{	# It must not point to another directory.
+		if (-d $dirlist)
+		{
+			$! = EISDIR;
+			warn "$dirlist: $!";
+			return $c->send_error(RC_INTERNAL_SERVER_ERROR);
+		}
+		$path = $dirlist;
+	}
+
+	if (($rc = check_path($c, $path)) != RC_OK)
+	{
+		return $rc;
+	} elsif (-f _)
 	{
 		return $c->send_file_response($path);
 	} elsif (-d _)
 	{
-		my ($dirlist, $readlink);
-
-		# Return $dirlist if it exists.  Don't redo WWW-Authenticate
-		# in this case because from the client's perspective this is
-		# not a redirection.
-		$dirlist = $path->new()->add(".dirlist");
-		$readlink = readlink($dirlist);
-		if (defined $readlink)
-		{
-			my ($path_dev, $path_ino);
-			my ($list_dev, $list_ino);
-
-			# Make sure that $readlink != $path to avoid direct
-			# loops.  (Alas, indirect loops remain possible.)
-			($path_dev, $path_ino) = stat(_);
-			($list_dev, $list_ino) = stat($dirlist);
-			if (!defined $list_dev || !defined $list_ino)
-			{	# $dirlist is a dangling symlink.
-				warn "$dirlist: ENOENT";
-				return $c->send_error(RC_INTERNAL_SERVER_ERROR);
-			}
-			if ($list_dev == $path_dev && $list_ino == $path_ino)
-			{
-				warn "$dirlist: ELOOP";
-				return $c->send_error(RC_INTERNAL_SERVER_ERROR);
-			} elsif (-d _)
-			{	# $dirlist points to a directory.
-				return send_dir($c, $r, $dirlist);
-			}
-
-			$readlink = Path->new($readlink);
-			if ($readlink->is_absolute())
-			{
-				return serve($c, $r, $readlink, 1);
-			} else
-			{
-				$path->add(@$readlink);
-				return serve($c, $r, $path, 1);
-			}
-		} elsif (-e $dirlist)
-		{
-			return serve($c, $r, $dirlist, 1);
-		} else
-		{
-			return send_dir($c, $r, $path);
-		}
+		return send_dir($c, $r, $path);
 	} else
 	{	# Special file, should have been caught by check_path().
 		return $c->send_error(RC_BAD_REQUEST);
