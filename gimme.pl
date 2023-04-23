@@ -635,7 +635,7 @@ sub send_tar
 	$path->pop();
 	($rc = check_path($client, $path)) == RC_OK
 		or return $rc;
-	return $client->send_error(RC_NOT_FOUND)
+	return $client->send_error(RC_BAD_REQUEST)
 		if ! -d _;
 
 	return in_subprocess(sub
@@ -938,7 +938,7 @@ sub serve
 		return send_dir($c, $r, $path);
 	} else
 	{	# Special file, should have been caught by check_path().
-		return $c->send_error(RC_BAD_REQUEST);
+		return $c->send_error(RC_INTERNAL_SERVER_ERROR);
 	}
 }
 
