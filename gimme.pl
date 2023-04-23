@@ -1092,9 +1092,11 @@ sub daemonize
 		open(STDIN, '<', "/dev/null")
 			or die "/dev/null: $!";
 		open(STDOUT, '>', "/dev/null")
-			or die "/dev/null: $!";
+			or die "/dev/null: $!"
+			if -t STDOUT;
 		open(STDERR, '>', "/dev/null")
-			or die "/dev/null: $!";
+			or die "/dev/null: $!"
+			if -t STDERR;
 
 		print CHLD_OUT "$$\n";
 		close(CHLD_OUT);
