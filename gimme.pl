@@ -7,7 +7,8 @@
 #
 # Synopsis:
 #   gimme.pl [--open|--listen <address>] [--port <port>] [--chroot]
-#            [--daemon] [--fork [<max-procs>]] [--nogimme] [<dir>]
+#            [--daemon] [--fork [<max-procs>]] [--htaccess] [--nogimme]
+#            [<dir>]
 #
 # <address> is the one to listen on, defaulting to localhost.  Use --open
 # to make the service available on all interfaces.  By default the port
@@ -24,6 +25,13 @@
 # process, blocking subsequent requests.  Otherwise a new process is started
 # until <max-procs> is reached, then requests are served sequentially.
 # If <max-procs> is omitted or 0 no such limit is imposed.
+#
+# With the --htaccess flag you can restrict access of directories selectively
+# by dropping .htaccess files there.  This disables tarball generation
+# automatically (as if --nogimme was specified), otherwise users would be able
+# to circumvent the restrictions by downloading the site.  If using this flag,
+# you should set up stunnel in front of Gimme because this authentication is
+# completely cleartext.
 #
 # If the --chroot flag is present Gimme chroot()s to <dir>.  This will
 # disable directory downloading unless you make tar(1) available in the
@@ -56,8 +64,10 @@
 #    line describing a file in the directory.  These descriptions are
 #    shown in directory listings.
 # -- <dir>/.motd is displayed in every directory listing.
-# -- If .htaccess is present in a directory Authorization: is demanded
-#    from the client (but _not_ verified).
+# -- If .htaccess is present in a directory and --htaccess is enabled,
+#    Authorization: is demanded from the client for all files and directories
+#    beneath.  The format of the file is a single line of "<user>:<password>".
+#    If the file is empty, access is denied unconditionally.
 # -- .headers: specify or override HTTP headers (e.g. Content-Type)
 #    when sending files from that directory.  You can supply a custom
 #    status line with the X-Status-Code and X-Reason-Phrase headers.
@@ -102,6 +112,12 @@ sub new
 	return ref $class && !$is_absolute
 		? $class->be($class->is_absolute(), $class->dirs(), @path)
 		: $class->be($is_absolute,                          @path);
+}
+
+sub dirname
+{
+	my $self = shift;
+	return $self->new()->pop()->add(@_);
 }
 
 sub dirs
@@ -301,9 +317,12 @@ sub send_file_response
 	my ($headers, $basename);
 	local *FH;
 
+	$basename = $$fname[-1];
+	return $self->send_error(RC_FORBIDDEN)
+		if $basename eq ".htaccess";
+
 	$headers = Path->new($fname)->pop()->add(".headers");
 	$headers = $headers->as_string();
-	$basename = $$fname[-1];
 	$fname = $fname->as_string();
 
 	if (!open(FH, '<', $fname))
@@ -473,8 +492,11 @@ chomp($SITE);
 # Don't tire these user agents with navigation bar or advertisement.
 my $ROBOTS = qr/\b(?:wget|googlebot)\b/i;
 
+# Enable .htaccess authorization?
+my $Opt_htaccess;
+
 # Display and serve Gimme! links?
-my $Opt_gimme = 1;
+my $Opt_gimme;
 
 # Order of files in a dirlist.
 my $Opt_dirlist_order = 'fname';
@@ -599,6 +621,65 @@ sub read_chunk
 	}
 }
 
+# Authorize $request based on .htaccess files.
+sub check_htaccess
+{
+	my ($client, $request, $path) = @_;
+	my $client_auth;
+
+	# Just return if --htaccess is not enabled.
+	$Opt_htaccess
+		or return RC_OK;
+
+	# Scan $path from leaf to the current directory for .htaccess files.
+	$path = $path->new();
+	$client_auth = $request->authorization_basic();
+	for (;;)
+	{
+		my $htaccess;
+		local *HTACCESS;
+
+		$htaccess = $path->new(".htaccess");
+		if (open(HTACCESS, '<', $htaccess))
+		{	# We've found one, $client_auth must satisfy it.
+			if (defined $client_auth)
+			{
+				my $auth = <HTACCESS>;
+				if (defined $auth)
+				{
+					chomp($auth);
+					last if $client_auth eq $auth;
+				} elsif ($! == 0)
+				{	# Empty .htaccess, deny access
+					# unconditionally.
+				} else
+				{
+					warn "$htaccess: $!";
+					return $client->send_error(
+						RC_INTERNAL_SERVER_ERROR);
+				}
+			}
+
+			my $rc = RC_UNAUTHORIZED;
+			$client->send_basic_header($rc);
+			print $client "WWW-Authenticate: Basic realm=",
+				'"', $path, '"', "\r\n";
+			print $client "\r\n";
+			return $rc;
+		} elsif ($! != ENOENT)
+		{
+			warn "$htaccess: $!";
+			return $client->send_error(RC_INTERNAL_SERVER_ERROR);
+		}
+
+		@$path > 1
+			or last;
+		$path->pop();
+	}
+
+	return RC_OK;
+}
+
 sub check_path
 {
 	my ($client, $path) = @_;
@@ -628,7 +709,7 @@ sub check_path
 
 sub send_tar
 {
-	my ($client, $path) = @_;
+	my ($client, $request, $path) = @_;
 	my $rc;
 
 	# The last component is expected to be the suggested file name.
@@ -637,6 +718,8 @@ sub send_tar
 		or return $rc;
 	return $client->send_error(RC_BAD_REQUEST)
 		if ! -d _;
+	($rc = check_htaccess($client, $request, $path)) == RC_OK
+		or return $rc;
 
 	return in_subprocess(sub
 	{
@@ -777,7 +860,7 @@ sub send_dir
 	# Get this directory's description from the parent's INDEX.
 	if ($path->dirs())
 	{
-		$index = get_index($path->new()->pop()->add('00INDEX'));
+		$index = get_index($path->dirname("00INDEX"));
 		$desc = $$index{$$path[-1]};
 		$desc = defined $desc ? para($desc) : '';
 	} else
@@ -896,24 +979,6 @@ sub serve
 	my ($c, $r, $path) = @_;
 	my ($dirlist, $rc);
 
-	my $authorization = $r->header("Authorization");
-	if (!defined $authorization)
-	{
-		my $dir = Path->new($path)->pop();
-		if (-f $dir->add(".htaccess")->as_string())
-		{
-			$rc = RC_UNAUTHORIZED;
-			$c->send_basic_header($rc);
-			print $c "WWW-Authenticate: Basic realm=",
-				'"', $dir->as_string(), '"', "\r\n";
-			print $c "\r\n";
-			return $rc;
-		}
-	} else
-	{
-		print " (Authorization: $authorization)"
-	}
-
 	# Is there a .dirlist file in $path?
 	lstat($dirlist = $path->new()->add(".dirlist"));
 	if (-e _)
@@ -932,9 +997,13 @@ sub serve
 		return $rc;
 	} elsif (-f _)
 	{
+		($rc = check_htaccess($c, $r, $path->dirname())) == RC_OK
+			or return $rc;
 		return $c->send_file_response($path);
 	} elsif (-d _)
 	{
+		($rc = check_htaccess($c, $r, $path)) == RC_OK
+			or return $rc;
 		return send_dir($c, $r, $path);
 	} else
 	{	# Special file, should have been caught by check_path().
@@ -973,7 +1042,7 @@ sub main
 		print " ($query)";
 		if ($Opt_gimme && $query eq 'gimme')
 		{
-			$rc = send_tar($c, $path);
+			$rc = send_tar($c, $r, $path);
 		} elsif ($Opt_gimme && $query eq 'gimmegimme')
 		{	# Send GIMME.
 			$c->send_response(HTTP::Response->new(
@@ -1084,6 +1153,7 @@ sub init
 		'C|chroot!'		=> \$chroot,
 		'D|daemon!'		=> \$daemonize,
 		'f|fork:i'		=> \$Opt_forking,
+		'htaccess!'		=> \$Opt_htaccess,
 		'gimme!'		=> \$Opt_gimme,
 		'sort-by-name'		=> sub
 		{
@@ -1094,6 +1164,10 @@ sub init
 			$Opt_dirlist_order = 'age';
 		},
 	);
+
+	# Disable Gimme! by default if --htaccess is enabled.
+	defined $Opt_gimme
+		or $Opt_gimme = !$Opt_htaccess;
 
 	# Determine the directory to serve.
 	if (!@ARGV)
