@@ -691,7 +691,7 @@ sub check_htaccess
 
 sub check_path
 {
-	my ($client, $path) = @_;
+	my ($client, $path, $error) = @_;
 
 	if (stat($path))
 	{
@@ -702,17 +702,18 @@ sub check_path
 		{
 			return RC_OK if -r _ && -x _;
 		}
-		return $client->send_error(RC_FORBIDDEN)
+		return $client->send_error($error // RC_FORBIDDEN)
 	} elsif ($! == ENOENT || $! == ENOTDIR)
 	{
-		return $client->send_error(RC_NOT_FOUND);
+		return $client->send_error($error // RC_NOT_FOUND);
 	} elsif ($! == EPERM || $! == EACCES)
 	{
-		return $client->send_error(RC_FORBIDDEN);
+		return $client->send_error($error // RC_FORBIDDEN);
 	} else
 	{
 		warn "$path: $!";
-		return $client->send_error(RC_INTERNAL_SERVER_ERROR);
+		return $client->send_error(
+			$error // RC_INTERNAL_SERVER_ERROR);
 	}
 }
 
@@ -986,20 +987,7 @@ sub urldecode
 sub serve
 {
 	my ($c, $r, $path) = @_;
-	my ($dirlist, $rc);
-
-	# Is there a .dirlist file in $path?
-	lstat($dirlist = $path->new()->add(".dirlist"));
-	if (-e _)
-	{	# It must not point to another directory.
-		if (-d $dirlist)
-		{
-			$! = EISDIR;
-			warn "$dirlist: $!";
-			return $c->send_error(RC_INTERNAL_SERVER_ERROR);
-		}
-		$path = $dirlist;
-	}
+	my $rc;
 
 	if (($rc = check_path($c, $path)) != RC_OK)
 	{
@@ -1011,13 +999,35 @@ sub serve
 		return $c->send_file_response($path);
 	} elsif (-d _)
 	{
+		my $dirlist;
+
 		($rc = check_htaccess($c, $r, $path)) == RC_OK
 			or return $rc;
-		return send_dir($c, $r, $path);
-	} else
-	{	# Special file, should have been caught by check_path().
-		return $c->send_error(RC_INTERNAL_SERVER_ERROR);
+
+		# Is there a .dirlist file in $path?
+		if (!lstat($dirlist = $path->new(".dirlist")))
+		{	# No, except if there was an error.
+			return send_dir($c, $r, $path)
+				if $! == ENOENT;
+			warn "$dirlist: $!";
+			return $c->send_error(RC_INTERNAL_SERVER_ERROR);
+		} elsif (($rc = check_path($c, $dirlist,
+					RC_INTERNAL_SERVER_ERROR)) != RC_OK)
+		{	# It's an internal error if $dirlist doesn't check out.
+			return $rc;
+		} elsif (-f _)
+		{
+			return $c->send_file_response($dirlist);
+		} elsif (-d _)
+		{	# $dirlist must not point to another directory.
+			$! = EISDIR;
+			warn "$dirlist: $!";
+			return $c->send_error(RC_INTERNAL_SERVER_ERROR);
+		}
 	}
+
+	# Special file, should have been caught by check_path().
+	return $c->send_error(RC_INTERNAL_SERVER_ERROR);
 }
 
 # Accept connections and serve requests.
