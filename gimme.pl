@@ -268,7 +268,6 @@ package GoodByeClient; # <<<
 use strict;
 use Errno qw(EACCES);
 use HTTP::Status;
-use HTTP::Date qw(time2str);
 use LWP::MediaTypes qw(guess_media_type);
 
 our @ISA = qw(HTTP::Daemon::ClientConn);
@@ -322,22 +321,16 @@ sub send_file
 	}
 }
 
-# Send custom .headers along with the file response.
+# Send custom headers along with the file response.
 sub send_file_response
 {
 	my ($self, $fname) = @_;
-	my ($headers, $basename);
 	local *FH;
 
-	$basename = $$fname[-1];
-	return $self->send_error(RC_FORBIDDEN)
-		if $basename eq ".htaccess";
-
-	$headers = Path->new($fname)->pop()->add(".headers");
-	$headers = $headers->as_string();
-	$fname = $fname->as_string();
-
-	if (!open(FH, '<', $fname))
+	if ($$fname[-1] eq ".htaccess")
+	{
+		return $self->send_error(RC_FORBIDDEN)
+	} elsif (!open(FH, '<', $fname))
 	{	# check_path() has verified we should have read access,
 		# so it's something else.
 		warn "$fname: $!";
@@ -348,125 +341,40 @@ sub send_file_response
 	if (!$self->antique_client())
 	{
 		my ($fsize, $mtime);
-		my (@status_line, @headers, %headers);
-		my ($content_type, $encoding);
-		local *HEADERS;
+		my ($config, $headers);
 
-		# Get $fname's $fsize and $mtime.
+		$config = main::get_per_dir_config($fname->dirname(),
+							$$fname[-1]);
+		$headers = $$config{'headers'} // HTTP::Headers->new();
+
+		# Set the Content-Length and Last-Modified headers.
 		(undef, undef, undef, undef, undef, undef, undef,
 			$fsize, undef, $mtime) = stat(FH);
 		defined $fsize && defined $mtime
 			or warn "$fname: $!";
 
-		# HEADERS => @status_line, @headers
-		my $section = "[common]";
-		if (open(HEADERS, '<', $headers))
-		{
-			LINE:
-			while (<HEADERS>)
-			{
-				my ($new_section, $header);
-
-				# Is it the beginning of a new $section?
-				chomp;
-				if ($_ eq "[common]" || $_ eq "[default]")
-				{
-					$section = $_;
-					next;
-				} elsif (s/^\[(.*)\]$/$1/)
-				{
-					my $negative = s/^\s*not\b//;
-					while (s!^\s*/(.*?)/\s*,?!!)
-					{
-						if ($1 ne $basename)
-						{
-							next;
-						} elsif ($negative)
-						{	# Negative match.
-							undef $section;
-							next LINE;
-						} else
-						{	# Positive match.
-							$section = "positive";
-							next LINE;
-						}
-					}
-
-					$section = $negative
-						? "negative" : undef;
-					next;
-				} elsif (!defined $section)
-				{	# This section is not applicable.
-					next;
-				}
-
-				# Don't set @status_line if we're in the
-				# [default] section and it's defined already.
-				if (s/^X-Status-Code:\s*//i)
-				{
-					$section eq "[default]"
-						&& defined $status_line[0]
-						or $status_line[0] = $_;
-					next;
-				} elsif (s/^X-Reason-Phrase:\s*//i)
-				{
-					$section eq "[default]"
-						&& defined $status_line[1]
-						or $status_line[1] = $_;
-					next;
-				}
-
-				($header) = $_ =~ /^([^:]+)\s*:/;
-				defined $header
-					or next;
-				$header = lc($header);
-
-				if ($section ne "[default]"
-					|| !$headers{$header})
-				{
-					push(@headers, $_);
-					$headers{$header} = 1;
-				}
-			}
-			close(HEADERS);
-		}
-
-		# Add an OK status code if we only got the reason phrase.
-		!@status_line || defined $status_line[0]
-			or $status_line[0] = RC_OK;
+		$headers->content_length($fsize)
+			if defined $fsize;
+		$headers->last_modified($mtime)
+			if defined $mtime;
 
 		# Guess Content-Type and/or Content-Encoing if they are
-		# not included in the %headers.
-		if (!$headers{'content-type'}
-			&& !$headers{'content-encoding'})
+		# not included in the $headers.
+		if (!defined $headers->content_type()
+			|| !defined $headers->content_encoding())
 		{
-			($content_type, $encoding) = guess_media_type($fname);
-		} elsif (!$headers{'content-type'})
-		{
-			$content_type = guess_media_type($fname);
-			$encoding = undef;
-		} elsif (!$headers{'content-encoding'})
-		{
-			$content_type = undef;
-			(undef, $encoding) = guess_media_type($fname);
-		} else
-		{
-			$content_type = $encoding = undef;
+			my ($content_type, $encoding) =
+				guess_media_type($fname);
+			$headers->init_header('Content-Type', $content_type)
+				if defined $content_type;
+			$headers->init_header('Content-Encoding', $encoding)
+				if defined $encoding;
 		}
 
-		# Send all the headers.
-		$self->send_basic_header(@status_line);
-		print $self "Content-Type: $content_type\r\n"
-			if defined $content_type;
-		print $self "Content-Encoding: $encoding\r\n"
-			if defined $encoding;
-		print $self "Content-Length: $fsize\r\n"
-			if defined $fsize;
-		print $self "Last-Modified: ", time2str($mtime), "\r\n"
-			if defined $mtime;
-		print $self $_, "\r\n"
-			foreach @headers;
-
+		# Send all the $headers.
+		$self->send_basic_header(
+			$$config{'status-code'}, $$config{'reason-phrase'});
+		print $self $headers->as_string();
 		print $self "\r\n";
 	}
 
@@ -764,6 +672,100 @@ sub send_tar
 
 		return RC_OK;
 	});
+}
+
+# Parse $dir/.headers and return the config applying to $basename.
+sub get_per_dir_config
+{
+	my ($dir, $basename) = @_;
+	my ($confname, %config, %default, $current);
+	local *HEADERS;
+
+	$confname = $dir->new(".headers");
+	if (!open(HEADERS, '<', $confname))
+	{
+		$! == ENOENT
+			or warn "$confname: $!";
+		return undef;
+	}
+
+	# Add the config on the current line to $current, which points to
+	# %default if we're processing the [default] section or %config
+	# if the current section applies to $basename.
+	$current = \%config;
+	$config{'headers'}  = HTTP::Headers->new();
+	$default{'headers'} = HTTP::Headers->new();
+LINE:	while (<HEADERS>)
+	{
+		next if /^\s*$/;
+		chomp;
+
+		# Is it the beginning of a new [section]?
+		if ($_ eq "[common]")
+		{
+			$current = \%config;
+			next;
+		} elsif ($_ eq "[default]")
+		{
+			$current = \%default;
+			next;
+		} elsif (s/^\[(.*)\]$/$1/)
+		{
+			my $negative = s/^\s*not\b//;
+			while (s!^\s*/(.*?)/\s*,?!!)
+			{
+				if ($1 ne $basename)
+				{
+					next;
+				} elsif ($negative)
+				{	# Negative match.
+					undef $current;
+					next LINE;
+				} else
+				{	# Positive match.
+					$current = \%config;
+					next LINE;
+				}
+			}
+
+			# No match found.
+			$current = $negative ? \%config : undef;
+			next;
+		} elsif (!defined $current)
+		{	# This section is not applicable.
+			next;
+		}
+
+		if (s/^X-Status-Code:\s*//i)
+		{
+			$$current{'status-code'} = $_;
+			next;
+		} elsif (s/^X-Reason-Phrase:\s*//i)
+		{
+			$$current{'reason-phrase'} = $_;
+			next;
+		}
+
+		my $header = $_;
+		if ($header !~ s/^(.+?)\s*:\s*//)
+		{
+			warn "$confname: invalid line";
+			next;
+		}
+		$$current{'headers'}->push_header($1, $header);
+	}
+
+	# Merge %config with %default.
+	defined $config{$_}
+		or $config{$_} = $default{$_}
+		for grep($_ ne "headers", keys(%default));
+
+	defined $config{'headers'}->header($_)
+		or $config{'headers'}->header(
+			$_ => [ $default{'headers'}->header($_) ])
+		for $default{'headers'}->header_field_names();
+
+	return \%config;
 }
 
 sub get_index
