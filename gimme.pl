@@ -69,12 +69,30 @@
 #    Authorization: is demanded from the client for all files and directories
 #    beneath.  The format of the file is a single line of "<user>:<password>".
 #    If the file is empty, access is denied unconditionally.
-# -- .headers: specify or override HTTP headers (e.g. Content-Type)
-#    when sending files from that directory.  You can supply a custom
-#    status line with the X-Status-Code and X-Reason-Phrase headers.
-#    You can define "[common]" and "[default]" headers, or restrict
-#    them to apply to specific "[/files/, /files2/]" or the other way
-#    around ("[not /file1/, /file2/]").
+# -- .gimme files contain per-directory settings.  This is best illustrated
+#    by an example:
+#
+#    # Comments and empty lines are ignored.
+#
+#    # Settings in this section apply to all files.  This is also the initial
+#    # section (ie. for settings preceding any [section]s).
+#    [common]
+#    status-code 202
+#
+#    # Settings in this section apply to all files unless the setting is also
+#    # specified in another applicable section.
+#    [default]
+#    reason-phrase Coming!
+#
+#    # This section applies to the "alpha" and "beta" files.  These are NOT
+#    # regular expressions.
+#    [/alpha/, /beta/]
+#    header Content-Type text/html
+#
+#    # This section applies to all files except "gamma" and "delta".
+#    [not /gamma/, /delta/]
+#    header Foo bar
+#    header Foo baz
 # >>>
 
 # Program code
@@ -674,14 +692,14 @@ sub send_tar
 	});
 }
 
-# Parse $dir/.headers and return the config applying to $basename.
+# Parse $dir/.gimme and return the config applying to $basename.
 sub get_per_dir_config
 {
 	my ($dir, $basename) = @_;
 	my ($confname, %config, %default, $current);
 	local *HEADERS;
 
-	$confname = $dir->new(".headers");
+	$confname = $dir->new(".gimme");
 	if (!open(HEADERS, '<', $confname))
 	{
 		$! == ENOENT
@@ -695,64 +713,57 @@ sub get_per_dir_config
 	$current = \%config;
 	$config{'headers'}  = HTTP::Headers->new();
 	$default{'headers'} = HTTP::Headers->new();
-LINE:	while (<HEADERS>)
+	while (<HEADERS>)
 	{
-		next if /^\s*$/;
+		next if /^\s*#/ || /^\s*$/;
 		chomp;
 
-		# Is it the beginning of a new [section]?
-		if ($_ eq "[common]")
+		# Is this the beginning of a new [section]?
+		if (s/^\[(.*)\]$/$1/)
 		{
-			$current = \%config;
-			next;
-		} elsif ($_ eq "[default]")
-		{
-			$current = \%default;
-			next;
-		} elsif (s/^\[(.*)\]$/$1/)
-		{
-			my $negative = s/^\s*not\b//;
-			while (s!^\s*/(.*?)/\s*,?!!)
+			if ($_ eq "common")
 			{
-				if ($1 ne $basename)
+				$current = \%config;
+			} elsif ($_ eq "default")
+			{
+				$current = \%default;
+			} else
+			{
+				my $matched = 0;
+				my $negative = s/^\s*not\b//;
+				while (s!^\s*/(.*?)/\s*,?!!)
 				{
-					next;
-				} elsif ($negative)
-				{	# Negative match.
-					undef $current;
-					next LINE;
-				} else
-				{	# Positive match.
-					$current = \%config;
-					next LINE;
+					if ($1 eq $basename)
+					{
+						$matched = 1;
+						last;
+					}
 				}
+
+				#  The section applies if
+				#  $matched && !$negative or
+				#  !$matched && $negative.
+				$current = (!$matched != !$negative)
+						? \%config : undef;
 			}
 
-			# No match found.
-			$current = $negative ? \%config : undef;
-			next;
-		} elsif (!defined $current)
-		{	# This section is not applicable.
 			next;
 		}
 
-		if (s/^X-Status-Code:\s*//i)
-		{
-			$$current{'status-code'} = $_;
-			next;
-		} elsif (s/^X-Reason-Phrase:\s*//i)
-		{
-			$$current{'reason-phrase'} = $_;
-			next;
-		}
+		# Skip setting if section is not applicable.
+		defined $current
+			or next;
 
-		my $header = $_;
-		if ($header !~ s/^(.+?)\s*:\s*//)
+		if (/^(status-code|reason-phrase) \s+ (.+)$/x)
+		{
+			$$current{$1} = $2;
+		} elsif (/^header \s+ (\S+) \s+ (.+)$/x)
+		{
+			$$current{'headers'}->push_header($1, $2);
+		} else
 		{
 			warn "$confname: invalid line";
-			next;
 		}
-		$$current{'headers'}->push_header($1, $header);
 	}
 
 	# Merge %config with %default.
