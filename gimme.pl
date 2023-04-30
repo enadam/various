@@ -7,8 +7,8 @@
 #
 # Synopsis:
 #   gimme.pl [--open|--listen <address>] [--port <port>] [--chroot]
-#            [--daemon] [--fork [<max-procs>]] [--htaccess] [--nogimme]
-#            [<dir>]
+#            [--daemon] [--fork [<max-procs>]] [--nogimme]
+#            [--auth <user>:<password> | --htaccess] [<dir>]
 #
 # <address> is the one to listen on, defaulting to localhost.  Use --open
 # to make the service available on all interfaces.  By default the port
@@ -29,9 +29,10 @@
 # With the --htaccess flag you can restrict access of directories selectively
 # by dropping .htaccess files there.  This disables tarball generation
 # automatically (as if --nogimme was specified), otherwise users would be able
-# to circumvent the restrictions by downloading the site.  If using this flag,
-# you should set up stunnel in front of Gimme because this authentication is
-# completely cleartext.
+# to circumvent the restrictions by downloading the site.  With the --auth
+# option you can protect the entire site without affecting tarball generation.
+# If using any of these flags, you should set up stunnel in front of Gimme
+# because this authentication is completely cleartext.
 #
 # If the --chroot flag is present Gimme chroot()s to <dir>.  This will
 # disable directory downloading unless you make tar(1) available in the
@@ -280,6 +281,17 @@ sub send_basic_header
 	print $self "Connection: close\r\n";
 }
 
+sub send_unauthorized
+{
+	my ($self, $path) = @_;
+
+	my $rc = RC_UNAUTHORIZED;
+	$self->send_basic_header($rc);
+	print $self "WWW-Authenticate: Basic realm=", '"', $path, '"', "\r\n";
+	print $self "\r\n";
+	return $rc;
+}
+
 sub send_file
 {
 	my ($self, $fh, $fname) = @_;
@@ -492,6 +504,9 @@ chomp($SITE);
 # Don't tire these user agents with navigation bar or advertisement.
 my $ROBOTS = qr/\b(?:wget|googlebot)\b/i;
 
+# Value of the --auth option.
+my $Opt_global_auth;
+
 # Enable .htaccess authorization?
 my $Opt_htaccess;
 
@@ -642,30 +657,24 @@ sub check_htaccess
 		$htaccess = $path->new(".htaccess");
 		if (open(HTACCESS, '<', $htaccess))
 		{	# We've found one, $client_auth must satisfy it.
-			if (defined $client_auth)
-			{
-				my $auth = <HTACCESS>;
-				if (defined $auth)
-				{
-					chomp($auth);
-					last if $client_auth eq $auth;
-				} elsif ($! == 0)
-				{	# Empty .htaccess, deny access
-					# unconditionally.
-				} else
-				{
-					warn "$htaccess: $!";
-					return $client->send_error(
-						RC_INTERNAL_SERVER_ERROR);
-				}
-			}
+			defined $client_auth
+				or return $client->send_unauthorized($path);
 
-			my $rc = RC_UNAUTHORIZED;
-			$client->send_basic_header($rc);
-			print $client "WWW-Authenticate: Basic realm=",
-				'"', $path, '"', "\r\n";
-			print $client "\r\n";
-			return $rc;
+			my $auth = <HTACCESS>;
+			if (defined $auth)
+			{
+				chomp($auth);
+				last if $client_auth eq $auth;
+				return $client->send_unauthorized($path);
+			} elsif ($! == 0)
+			{	# Empty .htaccess, deny access unconditionally.
+				return $client->send_unauthorized($path);
+			} else
+			{
+				warn "$htaccess: $!";
+				return $client->send_error(
+					RC_INTERNAL_SERVER_ERROR);
+			}
 		} elsif ($! != ENOENT)
 		{
 			warn "$htaccess: $!";
@@ -1015,7 +1024,7 @@ sub serve
 sub main
 {
 	my $d = shift;
-	my ($c, $r, $path, $query, $rc);
+	my ($c, $r, $path, $auth, $query, $rc);
 	my @warnings;
 
 	# Be fair to everyone and allow one request per connection.
@@ -1037,6 +1046,11 @@ sub main
 	} elsif (grep($_ eq '..', @$path))
 	{	# Filter out malice.
 		$rc = $c->send_error(RC_FORBIDDEN);
+	} elsif (defined $Opt_global_auth
+		&& (!defined ($auth = $r->authorization_basic())
+			|| $auth ne $Opt_global_auth))
+	{
+		$rc = $c->send_unauthorized('/');
 	} elsif (defined ($query = $r->url()->query()))
 	{	# Process special queries.
 		print " ($query)";
@@ -1153,6 +1167,7 @@ sub init
 		'C|chroot!'		=> \$chroot,
 		'D|daemon!'		=> \$daemonize,
 		'f|fork:i'		=> \$Opt_forking,
+		'auth=s'		=> \$Opt_global_auth,
 		'htaccess!'		=> \$Opt_htaccess,
 		'gimme!'		=> \$Opt_gimme,
 		'sort-by-name'		=> sub
@@ -1164,6 +1179,11 @@ sub init
 			$Opt_dirlist_order = 'age';
 		},
 	);
+
+	# In my tests user agents didn't send multiple Authorization headers,
+	# so it's pointless to have both.
+	die "--htaccess doesn't go with --auth"
+		if defined $Opt_global_auth && $Opt_htaccess;
 
 	# Disable Gimme! by default if --htaccess is enabled.
 	defined $Opt_gimme
