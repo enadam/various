@@ -284,6 +284,7 @@ sub update
 package GoodByeClient; # <<<
 
 use strict;
+use Carp;
 use Errno qw(EACCES);
 use HTTP::Status;
 use LWP::MediaTypes qw(guess_media_type);
@@ -307,6 +308,14 @@ sub send_unauthorized
 	print $self "WWW-Authenticate: Basic realm=", '"', $path, '"', "\r\n";
 	print $self "\r\n";
 	return $rc;
+}
+
+sub send_error_with_warning
+{
+	my ($self, $what, $error) = @_;
+
+	carp "$what: $!";
+	return $self->send_error($error // RC_INTERNAL_SERVER_ERROR);
 }
 
 sub send_file
@@ -351,8 +360,7 @@ sub send_file_response
 	} elsif (!open(FH, '<', $fname))
 	{	# check_path() has verified we should have read access,
 		# so it's something else.
-		warn "$fname: $!";
-		return $self->send_error(RC_INTERNAL_SERVER_ERROR);
+		return $self->send_error_with_warning($fname);
 	}
 	binmode(FH);
 
@@ -597,14 +605,12 @@ sub check_htaccess
 				return $client->send_unauthorized($path);
 			} else
 			{
-				warn "$htaccess: $!";
-				return $client->send_error(
-					RC_INTERNAL_SERVER_ERROR);
+				return $client->send_error_with_warning(
+								$htaccess);
 			}
 		} elsif ($! != ENOENT)
 		{
-			warn "$htaccess: $!";
-			return $client->send_error(RC_INTERNAL_SERVER_ERROR);
+			return $client->send_error_with_warning($htaccess);
 		}
 
 		@$path > 1
@@ -637,8 +643,7 @@ sub check_path
 		return $client->send_error($error // RC_FORBIDDEN);
 	} else
 	{
-		warn "$path: $!";
-		return $client->send_error(
+		return $client->send_error_with_warning($path,
 			$error // RC_INTERNAL_SERVER_ERROR);
 	}
 }
@@ -659,8 +664,8 @@ sub send_tar
 
 	return in_subprocess(sub
 	{
-		my ($dir, $progress);
 		local *TAR;
+		my ($dir, @tar, $progress);
 
 		# What to transform the initial '.' of the paths in the archive
 		# to.  This should be the directory name we made the archive of
@@ -669,15 +674,16 @@ sub send_tar
 		$dir =~ s/\\/\\\\/g;
 		$dir =~ s/!/\\!/g;
 
-		# Start tar(1) and make it transform the path prefixes to $dir
-		# if we are serving the body of the response.
-		if (!$client->head_request() && !open(TAR, '-|',
-			qw(tar cz), '-C', $path,
-			'--transform', "s!^\\.\$!$dir!;s!^\\./!$dir/!", '.'))
-		{
-			warn "tar: $!";
-			return $client->send_error(RC_SERVICE_UNAVAILABLE);
-		}
+		# Make tar(1) transform the path prefixes to $dir.
+		@tar = (qw(tar cz), '-C', $path,
+			'--transform', "s!^\\.\$!$dir!;s!^\\./!$dir/!",
+			'.');
+
+		# Start tar(1) unless we're serving a HEAD request.
+		$client->head_request()
+			or open(TAR, '-|', @tar)
+			or return $client->send_error_with_warning(
+					"tar", RC_SERVICE_UNAVAILABLE);
 
 		# Stop spending cycles as soon as the client hangs up.
 		my $sigpipe;
@@ -1020,10 +1026,9 @@ sub serve
 		# Is there a .dirlist file in $path?
 		if (!lstat($dirlist = $path->new(".dirlist")))
 		{	# No, except if there was an error.
-			return send_dir($c, $r, $path)
-				if $! == ENOENT;
-			warn "$dirlist: $!";
-			return $c->send_error(RC_INTERNAL_SERVER_ERROR);
+			return $c->send_error_with_warning($dirlist)
+				if $! != ENOENT;
+			return send_dir($c, $r, $path);
 		} elsif (($rc = check_path($c, $dirlist,
 					RC_INTERNAL_SERVER_ERROR)) != RC_OK)
 		{	# It's an internal error if $dirlist doesn't check out.
@@ -1034,8 +1039,7 @@ sub serve
 		} elsif (-d _)
 		{	# $dirlist must not point to another directory.
 			$! = EISDIR;
-			warn "$dirlist: $!";
-			return $c->send_error(RC_INTERNAL_SERVER_ERROR);
+			return $c->send_error_with_warning($dirlist);
 		}
 	}
 
