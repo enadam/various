@@ -7,7 +7,8 @@
 #
 # Synopsis:
 #   gimme.pl [--open|--listen <address>] [--port <port>] [--chroot]
-#            [--daemon] [--fork [<max-procs>]] [--nogimme] [--upload]
+#            [--daemon] [--fork [<max-procs>]] [--nogimme]
+#            [--upload | --upload-by-default]
 #            [--auth <user>:<password> | --htaccess] [<dir>]
 #
 # <address> is the one to listen on, defaulting to localhost.  Use --open
@@ -35,8 +36,12 @@
 # because this authentication is completely cleartext.
 #
 # The --upload flag enables file uploading with multipart/form-data POST
-# requests.  The payload is first saved to a temporary file, which is removed
-# if the upload is unsuccessful.  Currently files cannot be overwritten.
+# requests.  This only enables the functionality, the concrete directories
+# where uploading is permitted must be configured so in the .gimme settings
+# (see below).  Alternatively the --upload-by-default option can enable
+# uploading in every directory where it's not configured explicitly.  Payloads
+# are first saved to a temporary file, which is removed if the upload is not
+# successful.  Currently files cannot be overwritten.
 #
 # If the --chroot flag is present Gimme chroot()s to <dir>.  This will
 # disable directory downloading unless you make tar(1) available in the
@@ -97,6 +102,19 @@
 #    [not /gamma/, /delta/]
 #    header Foo bar
 #    header Foo baz
+#
+#    # This section applies to the directory where the config is located.
+#    # No other section (eg. [common]) applies to this directory.
+#    [this-dir]
+#    # Uploading files to this directory is possible if the --update flag
+#    # is specified.
+#    upload-enabled true
+#
+#    [/epsilon/]
+#    # Uploading files to this directory is NOT permitted, even if the
+#    # --upload-by-default flag is specified, except if overridden in
+#    # [this-dir] of epsilon/.gimme.
+#    upload-enabled false
 # >>>
 
 # Program code
@@ -454,7 +472,7 @@ my $Opt_htaccess;
 my $Opt_gimme;
 
 # Allow uploading files?
-my $Opt_upload;
+my ($Opt_upload_enabled, $Opt_upload_by_default);
 
 # Order of files in a dirlist.
 my $Opt_dirlist_order = 'fname';
@@ -674,13 +692,38 @@ sub check_dir
 	return check_htaccess($client, $request, $path);
 }
 
+# Return whether the user may upload files into $path.
+sub may_upload
+{
+	my $path = shift;
+	my $config;
+
+	$Opt_upload_enabled
+		or return undef;
+
+	# Is uploading enabled/disabled in [this-dir] of $path/.gimme?
+	$config = get_per_dir_config($path);
+	return $$config{'upload-enabled'}
+		if defined $$config{'upload-enabled'};
+
+	# Is uploading enabled in the parent directory's settings?
+	if ($path->dirs())
+	{
+		$config = get_per_dir_config($path->dirname(), $$path[-1]);
+		return $$config{'upload-enabled'}
+			if defined $$config{'upload-enabled'};
+	}
+
+	return $Opt_upload_by_default;
+}
+
 # Take a file in a POST request and save it into $path.
 sub upload
 {
 	my ($client, $request, $path) = @_;
 	my ($rc, $file, $dst, $tmp);
 
-	$Opt_upload
+	may_upload($path)
 		or return $client->send_error(RC_FORBIDDEN);
 	($rc = check_dir($client, $request, $path)) == RC_OK
 		or return $rc;
@@ -791,7 +834,8 @@ sub send_tar
 	});
 }
 
-# Parse $dir/.gimme and return the config applying to $basename.
+# Parse $dir/.gimme and return the config applying to $basename.  If $basename
+# is not defined, only return the settings of [this-dir].
 sub get_per_dir_config
 {
 	my ($dir, $basename) = @_;
@@ -809,7 +853,7 @@ sub get_per_dir_config
 	# Add the config on the current line to $current, which points to
 	# %default if we're processing the [default] section or %config
 	# if the current section applies to $basename.
-	$current = \%config;
+	$current = defined $basename ? \%config : undef;
 	$config{'headers'}  = HTTP::Headers->new();
 	$default{'headers'} = HTTP::Headers->new();
 	while (<HEADERS>)
@@ -820,7 +864,13 @@ sub get_per_dir_config
 		# Is this the beginning of a new [section]?
 		if (s/^\[(.*)\]$/$1/)
 		{
-			if ($_ eq "common")
+			if (!defined $basename)
+			{
+				$current = $_ eq "this-dir" ? \%config : undef;
+			} elsif ($_ eq "this-dir")
+			{	# Skip this section if $basename was provided.
+				$current = undef;
+			} elsif ($_ eq "common")
 			{
 				$current = \%config;
 			} elsif ($_ eq "default")
@@ -853,7 +903,10 @@ sub get_per_dir_config
 		defined $current
 			or next;
 
-		if (/^(status-code|reason-phrase) \s+ (.+)$/x)
+		if (/^(upload-enabled) \s+ (true|false)$/x)
+		{
+			$$current{$1} = $2 eq "true";
+		} elsif (/^(status-code|reason-phrase) \s+ (.+)$/x)
 		{
 			$$current{$1} = $2;
 		} elsif (/^header \s+ (\S+) \s+ (.+)$/x)
@@ -993,7 +1046,7 @@ sub send_dir
 
 	# The upload form.
 	$upload = form(label("Upload file:"), file_input(), submit())
-		if $Opt_upload;
+		if may_upload($path);
 
 	# Description of the stuff in this directory.
 	$index = get_index($path->new('00INDEX'));
@@ -1298,7 +1351,12 @@ sub init
 		'auth=s'		=> \$Opt_global_auth,
 		'htaccess!'		=> \$Opt_htaccess,
 		'gimme!'		=> \$Opt_gimme,
-		'upload!'		=> \$Opt_upload,
+		'upload!'		=> \$Opt_upload_enabled,
+		'upload-by-default'	=> sub
+		{
+			$Opt_upload_enabled = 1;
+			$Opt_upload_by_default = 1;
+		},
 		'sort-by-name'		=> sub
 		{
 			$Opt_dirlist_order = 'fname';
