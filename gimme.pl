@@ -7,7 +7,7 @@
 #
 # Synopsis:
 #   gimme.pl [--open|--listen <address>] [--port <port>] [--chroot]
-#            [--daemon] [--fork [<max-procs>]] [--nogimme]
+#            [--daemon] [--fork [<max-procs>]] [--nogimme] [--upload]
 #            [--auth <user>:<password> | --htaccess] [<dir>]
 #
 # <address> is the one to listen on, defaulting to localhost.  Use --open
@@ -33,6 +33,10 @@
 # option you can protect the entire site without affecting tarball generation.
 # If using any of these flags, you should set up stunnel in front of Gimme
 # because this authentication is completely cleartext.
+#
+# The --upload flag enables file uploading with multipart/form-data POST
+# requests.  The payload is first saved to a temporary file, which is removed
+# if the upload is unsuccessful.  Currently files cannot be overwritten.
 #
 # If the --chroot flag is present Gimme chroot()s to <dir>.  This will
 # disable directory downloading unless you make tar(1) available in the
@@ -418,8 +422,10 @@ package main;
 use strict;
 use Getopt::Long;
 use Scalar::Util;
+use File::Temp;
 use POSIX qw(uname setsid WNOHANG);
-use Errno qw(ENOENT ENOTDIR EISDIR EPERM EACCES);
+use Fcntl qw(O_CREAT O_WRONLY O_EXCL);
+use Errno qw(EEXIST ENOENT ENOTDIR EISDIR EPERM EACCES ENOSPC);
 use HTTP::Daemon;
 use HTTP::Status;
 
@@ -446,6 +452,9 @@ my $Opt_htaccess;
 
 # Display and serve Gimme! links?
 my $Opt_gimme;
+
+# Allow uploading files?
+my $Opt_upload;
 
 # Order of files in a dirlist.
 my $Opt_dirlist_order = 'fname';
@@ -476,6 +485,11 @@ sub row		{ "\t\t<TR>\n@_\t\t</TR>\n"			}
 sub cell	{ "\t\t\t<TD>$_[0]</TD>\n"			}
 sub right	{ "\t\t\t<TD align=\"right\">$_[0]</TD>\n"	}
 sub para	{ "\t<P>@_</P>\n"				}
+sub form	{ "\t<FORM method=\"POST\" enctype=\"multipart/form-data\">\n"
+		. "\t\t<P/>\n@_\t\t<P/>\n\t</FORM>\n" }
+sub label	{ "\t\t<LABEL>$_[0]</LABEL>\n"			}
+sub file_input	{ "\t\t<INPUT type=\"file\" name=\"fname\">\n"	}
+sub submit	{ "\t\t<INPUT type=\"submit\">\n"		}
 sub color	{ sprintf('<FONT color="#%.2X%.2X%.2X">%s</FONT>', @_) }
 
 sub mklink
@@ -648,6 +662,89 @@ sub check_path
 	}
 }
 
+sub check_dir
+{
+	my ($client, $request, $path) = @_;
+	my $rc;
+
+	($rc = check_path($client, $path)) == RC_OK
+		or return $rc;
+	return $client->send_error(RC_BAD_REQUEST)
+		if ! -d _;
+	return check_htaccess($client, $request, $path);
+}
+
+# Take a file in a POST request and save it into $path.
+sub upload
+{
+	my ($client, $request, $path) = @_;
+	my ($rc, $file, $dst, $tmp);
+
+	$Opt_upload
+		or return $client->send_error(RC_FORBIDDEN);
+	($rc = check_dir($client, $request, $path)) == RC_OK
+		or return $rc;
+
+	# Get the multipart message to upload and the destination file name.
+	# Set a fake Content-Location header, so HTTP::Response::filename()
+	# won't crash if a file name is not provided with Content-Disposition.
+	defined ($file = $request->parts())
+		or return $client->send_error(RC_BAD_REQUEST,
+						"Nothing to upload.");
+	$file->init_header("Content-Location" => " ");
+	defined ($dst = HTTP::Response::filename($file)) && length($dst) > 0
+		or return $client->send_error(RC_BAD_REQUEST,
+						"No file name provided.");
+
+	# $dst must be a basename.
+	$dst !~ m!/!
+		or return $client->send_error(RC_BAD_REQUEST);
+	print ": $dst";
+
+	# Preliminary check to verify that $dst doesn't exist.
+	$dst = $path->new($dst);
+	if (lstat($dst))
+	{
+		$! = EEXIST;
+		return $client->send_error(RC_CONFLICT, "$!");
+	} elsif ($! != ENOENT)
+	{
+		return $client->send_error_with_warning($dst);
+	}
+
+	# Open a temporary file and write $file to it.  File::Temp must be
+	# called in an eval because it croaks (dies) if unsuccessful.
+	if (!defined ($tmp = eval {
+		File::Temp->new(DIR => $path,
+				TEMPLATE => ".gimme.$$dst[-1].XXXXXX") }))
+	{
+		warn "$@";
+		return $client->send_error($! == EACCES
+						? RC_FORBIDDEN
+						: RC_INTERNAL_SERVER_ERROR);
+	} elsif (!$tmp->write(${$file->content_ref()}) || !$tmp->close())
+	{
+		warn "$tmp: $!";
+		return $client->send_error(RC_SERVICE_UNAVAILABLE, "$!")
+			if $! == ENOSPC;
+		return $client->send_error(RC_INTERNAL_SERVER_ERROR);
+	}
+
+	# link(2) doesn't overwrite $dst if it has come into existence
+	# since we checked.  $tmp is cleaned up automatically.
+	if (!link($tmp, $dst))
+	{
+		return $client->send_error(RC_CONFLICT, "$!")
+			if $! == EEXIST;
+		return $client->send_error(RC_FORBIDDEN)
+			if $! == EACCES;
+		return $client->send_error_with_warning("link($tmp -> $dst)");
+	}
+
+	# All OK, redirect the client to wherever it would have gone.
+	return serve($client, $request, $path);
+}
+
 sub send_tar
 {
 	my ($client, $request, $path) = @_;
@@ -655,11 +752,7 @@ sub send_tar
 
 	# The last component is expected to be the suggested file name.
 	$path->pop();
-	($rc = check_path($client, $path)) == RC_OK
-		or return $rc;
-	return $client->send_error(RC_BAD_REQUEST)
-		if ! -d _;
-	($rc = check_htaccess($client, $request, $path)) == RC_OK
+	($rc = check_dir($client, $request, $path)) == RC_OK
 		or return $rc;
 
 	return in_subprocess(sub
@@ -833,9 +926,8 @@ sub send_dir
 {
 	my ($client, $request, $path) = @_;
 	my ($ua, $isrobi, $location);
-	my ($motd, $navi, @upper, @lower);
-	my (@list, $list, $ad);
-	my ($index, $desc);
+	my ($navi, $motd, $desc, $upload, $ad);
+	my ($index, @list, $list);
 	local *MOTD;
 
 	# Is $client a robot?
@@ -846,6 +938,8 @@ sub send_dir
 	$location = Path->new('/');
 	if (!$isrobi)
 	{
+		my (@upper, @lower);
+
 		push(@upper, mklink($location, 'Site root'));
 		push(@lower, mklink('Gimme!', 'Download site',
 					"/$SITE.tar.gz", 'gimme'))
@@ -896,6 +990,10 @@ sub send_dir
 	{
 		$desc = para("This is ${SITE}'s root directory.");
 	}
+
+	# The upload form.
+	$upload = form(label("Upload file:"), file_input(), submit())
+		if $Opt_upload;
 
 	# Description of the stuff in this directory.
 	$index = get_index($path->new('00INDEX'));
@@ -987,7 +1085,7 @@ sub send_dir
 	$client->send_response(HTTP::Response->new(RC_OK, 'Okie',
 		[ 'Content-Type' => 'text/html' ],
 		html($location, grep(defined,
-			($navi, $motd, $desc, $list, $ad)))));
+			($navi, $motd, $desc, $upload, $list, $ad)))));
 
 	return RC_OK;
 }
@@ -1067,7 +1165,7 @@ sub main
 	print ~~localtime(), " ", $c->peerhost(),
 		": ", $r->method(), ": ", $path;
 	$path = Path->new($path)->as_relative();
-	if (!grep($r->method() eq $_, "HEAD", "GET"))
+	if (!grep($r->method() eq $_, "HEAD", "GET", "POST"))
 	{	# Filter out junk.
 		$rc = $c->send_error(RC_METHOD_NOT_ALLOWED);
 	} elsif (grep($_ eq '..', @$path))
@@ -1078,6 +1176,9 @@ sub main
 			|| $auth ne $Opt_global_auth))
 	{
 		$rc = $c->send_unauthorized('/');
+	} elsif ($r->method() eq "POST")
+	{
+		$rc = upload($c, $r, $path);
 	} elsif (defined ($query = $r->url()->query()))
 	{	# Process special queries.
 		print " ($query)";
@@ -1197,6 +1298,7 @@ sub init
 		'auth=s'		=> \$Opt_global_auth,
 		'htaccess!'		=> \$Opt_htaccess,
 		'gimme!'		=> \$Opt_gimme,
+		'upload!'		=> \$Opt_upload,
 		'sort-by-name'		=> sub
 		{
 			$Opt_dirlist_order = 'fname';
