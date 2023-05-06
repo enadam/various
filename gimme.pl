@@ -451,6 +451,7 @@ use Fcntl qw(O_CREAT O_WRONLY O_EXCL);
 use Errno qw(EEXIST ENOENT ENOTDIR EISDIR EPERM EACCES ENOSPC);
 use HTTP::Daemon;
 use HTTP::Status;
+use HTTP::Headers::Util;
 
 # For chrooted mode.
 use File::Basename;
@@ -511,7 +512,8 @@ sub para	{ "\t<P>@_</P>\n"				}
 sub form	{ "\t<FORM method=\"POST\" enctype=\"multipart/form-data\">\n"
 		. "\t\t<P/>\n@_\t\t<P/>\n\t</FORM>\n" }
 sub label	{ "\t\t<LABEL>$_[0]</LABEL>\n"			}
-sub file_input	{ "\t\t<INPUT type=\"file\" name=\"fname\">\n"	}
+sub file_input	{ "\t\t<INPUT type=\"file\" name=\"$_[0]\">\n"	}
+sub text_input	{ "\t\t<INPUT text=\"file\" name=\"$_[0]\">\n"	}
 sub submit	{ "\t\t<INPUT type=\"submit\">\n"		}
 sub color	{ sprintf('<FONT color="#%.2X%.2X%.2X">%s</FONT>', @_) }
 
@@ -726,7 +728,7 @@ sub may_upload
 sub upload
 {
 	my ($client, $request, $path) = @_;
-	my ($ok, $rc, $file, $dst, $tmp);
+	my ($ok, $rc, $part, $file, $dst, $tmp);
 
 	defined ($ok = may_upload($path))
 		or return $client->send_error(RC_FORBIDDEN);
@@ -734,19 +736,51 @@ sub upload
 		or return $rc;
 
 	# Get the multipart message to upload and the destination file name.
-	# Set a fake Content-Location header, so HTTP::Response::filename()
-	# won't crash if a file name is not provided with Content-Disposition.
-	defined ($file = $request->parts())
+	for $part ($request->parts())
+	{
+		my (@ary, $disp, %params);
+
+		defined ($disp = $part->header('Content-Disposition'))
+			or next;
+		(@ary = HTTP::Headers::Util::split_header_words($disp)) > 0
+			or next;
+
+		($disp, undef, %params) = @{$ary[0]};
+		$disp eq "form-data"
+			or next;
+
+		if ($params{'name'} eq "file")
+		{
+			$file = $part;
+		} elsif ($params{'name'} eq "fname")
+		{
+			$dst = $part->content();
+		}
+	}
+
+	defined $file
 		or return $client->send_error(RC_BAD_REQUEST,
 						"Nothing to upload.");
-	$file->init_header("Content-Location" => " ");
-	defined ($dst = HTTP::Response::filename($file)) && length($dst) > 0
-		or return $client->send_error(RC_BAD_REQUEST,
-						"No file name provided.");
 
-	# $dst must be a basename.
-	$dst !~ m!/!
-		or return $client->send_error(RC_BAD_REQUEST);
+	if (!defined $dst || !length($dst))
+	{	# Set a fake header, so the function call won't crash
+		# if a file name is not provided with Content-Disposition.
+		$file->init_header("Content-Location" => " ");
+		$dst = HTTP::Response::filename($file);
+	}
+	if (defined $dst)
+	{	# Sanitize $dst.
+		$dst =~ s/^\s+//;
+		$dst =~ s/\s+$//;
+	}
+	if (!defined $dst || !length($dst))
+	{
+		return $client->send_error(RC_BAD_REQUEST,
+						"No file name provided.");
+	} elsif ($dst =~ m!/!)
+	{	# $dst must be a basename.
+		return $client->send_error(RC_BAD_REQUEST);
+	}
 	print ": $dst";
 
 	# .dotfiles cannot be overwritten.
@@ -1072,7 +1106,9 @@ sub send_dir
 	}
 
 	# The upload form.
-	$upload = form(label("Upload file:"), file_input(), submit())
+	$upload = form(label("Upload file:"), file_input("file"),
+			label("File name:"), text_input("fname"),
+			submit())
 		if may_upload($path);
 
 	# Description of the stuff in this directory.
