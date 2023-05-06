@@ -8,7 +8,7 @@
 # Synopsis:
 #   gimme.pl [--open|--listen <address>] [--port <port>] [--chroot]
 #            [--daemon] [--fork [<max-procs>]] [--nogimme]
-#            [--upload | --upload-by-default]
+#            [--upload | --upload-by-default | --overwrite-by-default]
 #            [--auth <user>:<password> | --htaccess] [<dir>]
 #
 # <address> is the one to listen on, defaulting to localhost.  Use --open
@@ -38,10 +38,11 @@
 # The --upload flag enables file uploading with multipart/form-data POST
 # requests.  This only enables the functionality, the concrete directories
 # where uploading is permitted must be configured so in the .gimme settings
-# (see below).  Alternatively the --upload-by-default option can enable
-# uploading in every directory where it's not configured explicitly.  Payloads
-# are first saved to a temporary file, which is removed if the upload is not
-# successful.  Currently files cannot be overwritten.
+# (see below).  Alternatively the --upload-by-default options can enable
+# uploading in every directory where it's not configured explicitly.  The
+# --overwrite-by-default flag makes the "upload-enabled overwrite" setting
+# the default.  Payloads are first saved to a temporary file, which is removed
+# if the upload is unsuccessful.  .dotfiles won't be allowed to be overwritten.
 #
 # If the --chroot flag is present Gimme chroot()s to <dir>.  This will
 # disable directory downloading unless you make tar(1) available in the
@@ -115,6 +116,10 @@
 #    # --upload-by-default flag is specified, except if overridden in
 #    # [this-dir] of epsilon/.gimme.
 #    upload-enabled false
+#
+#    [/sigma/]
+#    # Files (except .dotfiles) can be overwritten in this directory.
+#    upload-enabled overwrite
 # >>>
 
 # Program code
@@ -721,9 +726,9 @@ sub may_upload
 sub upload
 {
 	my ($client, $request, $path) = @_;
-	my ($rc, $file, $dst, $tmp);
+	my ($ok, $rc, $file, $dst, $tmp);
 
-	may_upload($path)
+	defined ($ok = may_upload($path))
 		or return $client->send_error(RC_FORBIDDEN);
 	($rc = check_dir($client, $request, $path)) == RC_OK
 		or return $rc;
@@ -744,15 +749,22 @@ sub upload
 		or return $client->send_error(RC_BAD_REQUEST);
 	print ": $dst";
 
+	# .dotfiles cannot be overwritten.
+	$dst !~ /^\./
+		or $ok = "no-overwrite";
+
 	# Preliminary check to verify that $dst doesn't exist.
 	$dst = $path->new($dst);
-	if (lstat($dst))
+	if ($ok ne "overwrite")
 	{
-		$! = EEXIST;
-		return $client->send_error(RC_CONFLICT, "$!");
-	} elsif ($! != ENOENT)
-	{
-		return $client->send_error_with_warning($dst);
+		if (lstat($dst))
+		{
+			$! = EEXIST;
+			return $client->send_error(RC_CONFLICT, "$!");
+		} elsif ($! != ENOENT)
+		{
+			return $client->send_error_with_warning($dst);
+		}
 	}
 
 	# Open a temporary file and write $file to it.  File::Temp must be
@@ -773,15 +785,30 @@ sub upload
 		return $client->send_error(RC_INTERNAL_SERVER_ERROR);
 	}
 
-	# link(2) doesn't overwrite $dst if it has come into existence
-	# since we checked.  $tmp is cleaned up automatically.
-	if (!link($tmp, $dst))
-	{
-		return $client->send_error(RC_CONFLICT, "$!")
-			if $! == EEXIST;
-		return $client->send_error(RC_FORBIDDEN)
-			if $! == EACCES;
-		return $client->send_error_with_warning("link($tmp -> $dst)");
+	if ($ok eq "overwrite")
+	{	# rename(2) overwrites $dst atomically.
+		if (!rename($tmp, $dst))
+		{
+			return $client->send_error(RC_CONFLICT, "$!")
+				if $! == EISDIR;
+			return $client->send_error(RC_FORBIDDEN)
+				if $! == EACCES;
+			return $client->send_error_with_warning(
+						"rename($tmp -> $dst)");
+		}
+		$tmp->unlink_on_destroy(0);
+	} else
+	{	# link(2) doesn't overwrite $dst if it has come into existence
+		# since we checked.  $tmp is cleaned up automatically.
+		if (!link($tmp, $dst))
+		{
+			return $client->send_error(RC_CONFLICT, "$!")
+				if $! == EEXIST;
+			return $client->send_error(RC_FORBIDDEN)
+				if $! == EACCES;
+			return $client->send_error_with_warning(
+						"link($tmp -> $dst)");
+		}
 	}
 
 	# All OK, redirect the client to wherever it would have gone.
@@ -903,9 +930,9 @@ sub get_per_dir_config
 		defined $current
 			or next;
 
-		if (/^(upload-enabled) \s+ (true|false)$/x)
+		if (/^(upload-enabled) \s+ (false|true|overwrite)$/x)
 		{
-			$$current{$1} = $2 eq "true";
+			$$current{$1} = $2 eq "false" ? 0 : $2;
 		} elsif (/^(status-code|reason-phrase) \s+ (.+)$/x)
 		{
 			$$current{$1} = $2;
@@ -1356,6 +1383,11 @@ sub init
 		{
 			$Opt_upload_enabled = 1;
 			$Opt_upload_by_default = 1;
+		},
+		'overwrite-by-default'	=> sub
+		{
+			$Opt_upload_enabled = 1;
+			$Opt_upload_by_default = "overwrite";
 		},
 		'sort-by-name'		=> sub
 		{
