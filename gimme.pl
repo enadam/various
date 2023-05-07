@@ -6,10 +6,12 @@
 # The exported directories will be browseable and downloadable as tarballs.
 #
 # Synopsis:
-#   gimme.pl [--open | --listen <address>] [--port <port>] [--chroot]
-#            [--user <user>] [--daemon] [--fork [<max-procs>]] [--nogimme]
+#   gimme.pl [--open | --listen <address>] [--port <port>]
+#            [--chroot] [--user <user>] [--daemon]
+#            [--fork [<max-procs>]] [--max-request-size <bytes>]
 #            [--upload | --upload-by-default | --overwrite-by-default]
-#            [--auth <user>:<password> | --htaccess] [<dir>]
+#            [--auth <user>:<password> | --htaccess]
+#            [--nogimme] [<dir>]
 #
 # <address> is the one to listen on, defaulting to localhost.  Use --open
 # to make the service available on all interfaces.  By default the port
@@ -57,7 +59,10 @@
 # Gimme was written with public (but not hostile) exposure in mind, so it is
 # thought to be relatively secure in the sense that it won't give away stuff
 # you didn't intend to share.  However, it can be DoS:ed and generally,
-# is not efficient with large files.
+# is not efficient with large files.  To prevent one class of abuse, HTTP
+# request sizes are restricted to 10 KiB or 10 MiB if uploading is enabled.
+# You can override or disable this limit (by specifying 0 <bytes>) with the
+# --max-request-size option.
 #
 # Special files:
 # -- If the requested path is a directory and there is not a .dirlist
@@ -439,6 +444,45 @@ sub send_file_response
 			return RC_OK;
 		});
 }
+
+# May be called by send_error() before httpd_client_proto is known.
+# Assume the client is not antique initially.
+sub antique_client
+{
+	my $self = shift;
+
+	return defined ${*$self}{'httpd_client_proto'}
+		? $self->SUPER::antique_client(@_)
+		: 0;
+}
+
+sub get_request
+{
+	my $self = shift;
+
+	my $buf = $self->read_buffer();
+	${*$self}{'request_size'} = defined $buf ? length($buf) : 0;
+	return $self->SUPER::get_request(@_);
+}
+
+sub _need_more
+{
+	my $self = shift;
+
+	if (defined ${*$self}{'request_size_limit'}
+		&& ${*$self}{'request_size'} > ${*$self}{'request_size_limit'})
+	{
+		warn $self->peerhost(), ": request too large ",
+			"(> ${*$self}{'request_size'} B)";
+		$self->send_error(RC_PAYLOAD_TOO_LARGE);
+		return undef;
+	}
+
+	my $n = $self->SUPER::_need_more(@_);
+	${*$self}{'request_size'} += $n
+		if $n;
+	return $n;
+}
 # >>>
 
 package main;
@@ -487,6 +531,9 @@ my $Opt_dirlist_order = 'fname';
 
 # Value of the --fork option.
 my $Opt_forking;
+
+# Value of the --max-request-size option.
+my $Opt_max_request_size;
 
 # PID of processess fork()ed by in_subprocess().  Used to determine
 # whether we have enough quota for another child.
@@ -1272,6 +1319,7 @@ sub main
 
 	# Be fair to everyone and allow one request per connection.
 	$c = $d->accept('GoodByeClient') until defined $c;
+	${*$c}{'request_size_limit'} = $Opt_max_request_size;
 	defined ($r = $c->get_request())
 		or return;
 
@@ -1437,6 +1485,7 @@ sub init
 		'C|chroot!'		=> \$chroot,
 		'D|daemon!'		=> \$daemonize,
 		'f|fork:i'		=> \$Opt_forking,
+		'max-request-size=i'	=> \$Opt_max_request_size,
 		'auth=s'		=> \$Opt_global_auth,
 		'htaccess!'		=> \$Opt_htaccess,
 		'gimme!'		=> \$Opt_gimme,
@@ -1460,6 +1509,16 @@ sub init
 			$Opt_dirlist_order = 'age';
 		},
 	);
+
+	# Set a default $Opt_max_request_size.
+	if (!defined $Opt_max_request_size)
+	{
+		$Opt_max_request_size = $Opt_upload_enabled
+						? 10*1024*1024 : 10*1024;
+	} elsif (!$Opt_max_request_size)
+	{	# Unlimited
+		undef $Opt_max_request_size;
+	}
 
 	# In my tests user agents didn't send multiple Authorization headers,
 	# so it's pointless to have both.
