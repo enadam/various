@@ -1319,6 +1319,7 @@ sub main
 
 	# Be fair to everyone and allow one request per connection.
 	$c = $d->accept('GoodByeClient') until defined $c;
+	$c->timeout(60);
 	${*$c}{'request_size_limit'} = $Opt_max_request_size;
 	defined ($r = $c->get_request())
 		or return;
