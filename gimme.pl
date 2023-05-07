@@ -6,8 +6,8 @@
 # The exported directories will be browseable and downloadable as tarballs.
 #
 # Synopsis:
-#   gimme.pl [--open|--listen <address>] [--port <port>] [--chroot]
-#            [--daemon] [--fork [<max-procs>]] [--nogimme]
+#   gimme.pl [--open | --listen <address>] [--port <port>] [--chroot]
+#            [--user <user>] [--daemon] [--fork [<max-procs>]] [--nogimme]
 #            [--upload | --upload-by-default | --overwrite-by-default]
 #            [--auth <user>:<password> | --htaccess] [<dir>]
 #
@@ -51,7 +51,7 @@
 # others require in run-time.  We're doing our best, though.
 #
 # Having privileged stuff done Gimme changes its UIDs and GIDs to those
-# owning the executable, then goes to the background if requested with
+# of <user> if specified, then goes to the background if requested with
 # the --daemon flag.  Otherwise access log is written to the standard output.
 #
 # Gimme was written with public (but not hostile) exposure in mind, so it is
@@ -446,7 +446,9 @@ use strict;
 use Getopt::Long;
 use Scalar::Util;
 use File::Temp;
-use POSIX qw(uname setsid WNOHANG);
+use User::pwent;
+use User::grent;
+use POSIX qw(setuid setgid uname setsid WNOHANG);
 use Fcntl qw(O_CREAT O_WRONLY O_EXCL);
 use Errno qw(EEXIST ENOENT ENOTDIR EISDIR EPERM EACCES ENOSPC);
 use HTTP::Daemon;
@@ -1331,16 +1333,39 @@ sub main
 # >>>
 
 # Initialization <<<
-# Change the group membership, the real and effective UIDs and GIDs
-# to the owner of the program so that we can't regain root again.
 sub drop_privileges
 {
-	my $u = (stat(GIMME))[4];
-	($)) = "$u $u";
-	($(, $)) = ($u, $u);
-	($<, $>) = ($u, $u);
-	$( = $u;
-	$< = $u;
+	my ($user, @groups) = @_;
+
+	$! = 0;
+	$) = join(' ', $user->gid(), map($_->gid(), @groups));
+	die "setgroups(", join(', ', map($_->name(), @groups)), "): $!"
+		if $!;
+
+	setgid($user->gid())
+		or die "setgid(", $user->gid(), "): $!";
+	setuid($user->uid())
+		or die "setuid(", $user->name(), "): $!";
+}
+
+sub get_user
+{
+	my $user = shift;
+	my ($pwent, $grent, @groups);
+
+	defined ($pwent = getpwnam($user))
+		or die "$user: unknown user";
+
+	# Collect the group memberships of $user.
+	while (defined ($grent = getgrent()))
+	{	# Add $grent to @groups if $user is in $grent->members().
+		push(@groups, $grent)
+		        if grep($_ eq $pwent->name(), @{$grent->members()});
+
+	}
+	endgrent();
+
+	return ($pwent, @groups);
 }
 
 # Go to the background by forking a grandchild.  Inspired by Proc::Daemon.
@@ -1397,8 +1422,8 @@ sub daemonize
 # Initialize the program.
 sub init
 {
-	my ($addr, $port, $chroot, $daemonize, $dir);
-	my $d;
+	my ($addr, $port, $user, $chroot, $daemonize, $dir);
+	my (@groups, $d);
 
 	# Parse the command line.
 	$addr = '127.0.0.1';
@@ -1408,6 +1433,7 @@ sub init
 		'a|open'		=> sub { undef $addr },
 		'i|listen=s'		=> \$addr,
 		'p|port=i'		=> \$port,
+		'u|user=s'		=> \$user,
 		'C|chroot!'		=> \$chroot,
 		'D|daemon!'		=> \$daemonize,
 		'f|fork:i'		=> \$Opt_forking,
@@ -1456,6 +1482,10 @@ sub init
 		die "Too many arguments";
 	}
 
+	# get_user() before chrooting.
+	($user, @groups) = get_user($user)
+		if defined $user;
+
 	# Keep ourselves open for gimmegimme.
 	open(GIMME, '<', $0);
 
@@ -1477,9 +1507,8 @@ sub init
 		die "$dir: $!" unless chdir($dir);
 	}
 
-	# Drop privileges if started as root.
-	drop_privileges
-		if $> == 0;
+	drop_privileges($user, @groups)
+		if defined $user;
 
 	daemonize()
 		if $daemonize;
