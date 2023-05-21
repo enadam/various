@@ -14,6 +14,7 @@
 # Usage: debcheck.pl <.deb> ...
 
 use strict;
+use File::Basename;
 use Dpkg::Control;
 
 $\ = "\n";
@@ -26,7 +27,7 @@ for my $fname (@ARGV)
 	my ($expected, $actual);
 
 	# Extract the package's name and version from the file name.
-	($pkg, $ver) = split(/_/, $fname);
+	($pkg, $ver) = split(/_/, File::Basename::basename($fname));
 	if (defined $ver)
 	{	# apt-get download may encode ':' in the version.
 		$ver =~ s/^(\d+)%3a/$1:/;
