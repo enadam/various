@@ -495,6 +495,7 @@ use User::grent;
 use POSIX qw(setuid setgid uname setsid WNOHANG);
 use Fcntl qw(O_CREAT O_WRONLY O_EXCL);
 use Errno qw(EEXIST ENOENT ENOTDIR EISDIR EPERM EACCES ENOSPC);
+use URI::Escape;
 use HTTP::Daemon;
 use HTTP::Status;
 use HTTP::Headers::Util;
@@ -569,24 +570,20 @@ sub color	{ sprintf('<FONT color="#%.2X%.2X%.2X">%s</FONT>', @_) }
 sub mklink
 {
 	my ($a, $title, $href, $q) = @_;
+	my $uri;
 
-	if (defined $href)
-	{
-		$href = URI->new($href);
-		$href->query($q) if defined $q;
-	} else
-	{
-		$href = URI->new($a);
-	}
+	$uri = URI->new();
+	$uri->path($href // $a);
+	$uri->query($q) if defined $q;
 
 	$a = escape($a);
 	if (defined $title)
 	{
 		$title = escape($title);
-		return "<A href=\"$href\" title=\"$title\">$a</A>";
+		return "<A href=\"$uri\" title=\"$title\">$a</A>";
 	} else
 	{
-		return "<A href=\"$href\">$a</A>";
+		return "<A href=\"$uri\">$a</A>";
 	}
 }
 # HTML generation >>>
@@ -1257,14 +1254,6 @@ sub send_dir
 # Functionality >>>
 
 # The main loop <<<
-# URL-decodes $str.
-sub urldecode
-{
-	my $str = shift;
-	$str =~ s/%([0-9][0-9])/{chr(hex($1))}/eg;
-	return $str;
-}
-
 # Serve $path if we can.
 sub serve
 {
@@ -1328,7 +1317,7 @@ sub main
 	# when we can print them clearly.
 	local $SIG{'__WARN__'} = sub { push(@warnings, $_[0]) };
 
-	$path = urldecode($r->url()->path());
+	$path = URI::Escape::uri_unescape($r->url()->path());
 	print ~~localtime(), " ", $c->peerhost(),
 		": ", $r->method(), ": ", $path;
 	$path = Path->new($path)->as_relative();
