@@ -939,7 +939,7 @@ sub send_tar
 		$progress = Progressometer->new($client->peerhost(), $path);
 		$client->send_response(HTTP::Response->new(
 			RC_OK, 'Here you go',
-			[ 'Content-Type' => 'application/x-tar' ],
+			[ 'Content-Type' => 'application/x-gtar-compressed' ],
 			sub { $sigpipe ? "" : read_chunk(*TAR, $progress) }));
 
 		return RC_OK;
