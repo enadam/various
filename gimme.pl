@@ -423,8 +423,13 @@ sub send_file_response
 		{
 			my ($content_type, $encoding) =
 				guess_media_type($fname);
-			$headers->init_header('Content-Type', $content_type)
-				if defined $content_type;
+			if (defined $content_type)
+			{
+				$content_type .= "; charset=UTF8"
+					if $content_type eq "text/plain";
+				$headers->init_header(
+					'Content-Type', $content_type);
+			}
 			$headers->init_header('Content-Encoding', $encoding)
 				if defined $encoding;
 		}
@@ -1245,7 +1250,7 @@ sub send_dir
 
 	# Put it all together.
 	$client->send_response(HTTP::Response->new(RC_OK, 'Okie',
-		[ 'Content-Type' => 'text/html' ],
+		[ 'Content-Type' => 'text/html; charset=UTF8' ],
 		html($location, grep(defined,
 			($navi, $motd, $desc, $upload, $list, $ad)))));
 
