@@ -1094,6 +1094,7 @@ if ($opt_overview)
 
 		# The first word can be a command.
 		my @commands = qw(
+			help clear exit
 			open reopen edit
 			reveal view copy
 			newline detach timeout
@@ -1160,6 +1161,9 @@ if ($opt_overview)
 				return 0;
 			} elsif ($what eq "help" || $what eq '?')
 			{	# <<<
+				print "clear                    - ",
+					"clear the screen, including ",
+					"the scrollback";
 				print "help, ?                  - ",
 					"???";
 				print "exit, q, ^D              - ",
@@ -1215,6 +1219,9 @@ if ($opt_overview)
 				print "    Acquire a new access token and ",
 					"copy it to the clipboard.";
 				# >>>
+			} elsif ($what eq "clear")
+			{
+				print $CLRSCR, "\e[3J";
 			} elsif ($what eq "")
 			{
 				check_vault($ini);
