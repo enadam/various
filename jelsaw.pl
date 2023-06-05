@@ -430,16 +430,19 @@ sub parse_section_and_key
 # Return the value of $section/$key in $ini.
 sub retrieve_key
 {
-	my ($ini, $section, $key) = @_;
+	my ($ini, $section, $key, $dflt) = @_;
 	my $val;
 
 	check_vault($ini);
-	if (!defined ($val = $ini->val($section, $key)))
-	{
-		die "$section/$key: no such key";
-	} else
+	if (defined ($val = $ini->val($section, $key)))
 	{
 		return $val;
+	} elsif (defined $dflt)
+	{
+		return $dflt;
+	} else
+	{
+		die "$section/$key: no such key";
 	}
 }
 
