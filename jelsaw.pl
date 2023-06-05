@@ -733,6 +733,16 @@ sub copy_to_selection
 		: copy_to_console_selection(@_);
 }
 
+# Show or copy a secret.
+sub return_to_user
+{
+	my $cmd = shift;
+
+	$cmd eq "view"
+		? print @_
+		: copy_to_selection(@_);
+}
+
 # Copy a key from $ini to the clipboard.
 sub copy_cmd
 {
@@ -936,7 +946,7 @@ sub oauth2_new_refresh_token
 			if defined $$json{"access_token"};
 	} else
 	{
-		copy_to_selection($$json{"refresh_token"});
+		return_to_user($cmd, $$json{"refresh_token"});
 	}
 }
 
@@ -967,13 +977,7 @@ sub oauth2_refresh_access_token
 	defined $$json{"access_token"}
 		or die "$provider: 'access_token' missing";
 
-	if ($cmd eq "view")
-	{
-		print $$json{"access_token"};
-	} else
-	{
-		copy_to_selection($$json{"access_token"});
-	}
+	return_to_user($cmd, $$json{"access_token"});
 }
 
 # Main starts here.
