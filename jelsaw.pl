@@ -57,9 +57,14 @@
 #   Copy the specified <key>'s secret value.
 #   Same as jelsaw.pl <vault> [<section>/][<key>].
 #
+# jelsaw.pl --oauth2 <vault> [<section>/][refresh|access]
 # jelsaw.pl --oauth2 --view|--copy [<section>/][refresh|access] <vault>
 #   Obtain a refresh or access token from an OAuth 2.0 provider and print it
 #   or copy it to the clipboard.  See below for details.
+#
+# jelsaw.pl --totp <vault> [<section>/][<key>]
+# jelsaw.pl --totp --view|--copy [<section>/][<key>] <vault>
+#   Generate an RFC 6238 time-based one-time password (TOTP).  See below.
 #
 # jelsaw.pl --overview|-l <vault>
 #   Show the sections and keys in the <vault>, but not the secret values.
@@ -173,6 +178,23 @@
 # Note that with GCP (Google) the refresh token will expire in 7 days unless
 # you "publish" your "app".  However, before publication you don't have to
 # submit it for verification (as long as you're the only one using it I guess).
+# >>>
+#
+# TOTP support <<<
+# ----------------
+#
+# jelsaw can generate TOTP:s if the shared secret is present in the vault in
+# base32 form.  It is assumed to be in the totp_shared_secret key of the
+# default section, but you can override that.  In the same section as the
+# shared secret additional parameters can be specified:
+#
+# * totp_time_step (default 30) is a positive integer denoting the number of
+#   seconds a TOTP is valid for.  Changing it to 1 results in a new OTP every
+#   second, which can be useful for testing.
+# * totp_digits (default 6) is the number of digits the returned TOTP to have
+#   (padded with zeroes if necessary).
+#
+# This functionality depends on Convert::Base32 and Digest::HMAC_SHA1.
 # >>>
 
 # Modules
@@ -983,10 +1005,70 @@ sub oauth2_refresh_access_token
 	return_to_user($cmd, $$json{"access_token"});
 }
 
+# Generate a TOTP (RFC 6238) based on the shared secret in the vault.
+sub gen_totp
+{
+	require Convert::Base32;
+	require Digest::HMAC_SHA1;
+
+	my ($ini, $selector, $cmd) = @_;
+	my ($section, $key);
+	my ($secret, $time_step, $digits);
+	my ($data, $hmac, $width, $bits, $offset, $word, $mask, $mod, $totp);
+
+	# Obtain the algorithm parameters.
+	($section, $key) = parse_section_and_key(
+		$selector, "totp_shared_secret");
+	$secret = retrieve_key($ini, $section, $key);
+
+	# Trim padding, not understood by Convert::Base32.
+	$secret =~ s/=+$//;
+	$secret = eval
+	{
+		local $SIG{'__DIE__'} = undef;
+		Convert::Base32::decode_base32($secret);
+	};
+	defined $secret
+		or die "Couldn't decode TOTP shared secret from base32: $@";
+
+	$time_step = retrieve_key($ini, $section, "totp_time_step", "30");
+	$time_step =~ /^\d+$/ && $time_step > 0
+		or die "TOTP time step \"$time_step\" is not a positive "
+			. "integer.";
+
+	# How many digits of OTP to generate.
+	$digits = retrieve_key($ini, $section, "totp_digits", "6");
+	$digits =~ /^\d+$/ && $digits > 0
+		or die "TOTP digits \"$digits\" is not a positive integer.";
+
+	# Calculate the OTP.
+	$data = pack('Q>', int(time() / $time_step));
+	$hmac = Digest::HMAC_SHA1::hmac_sha1($data, $secret);
+
+	# The lowest 4 bits of $hmac are an $offset in $hmac.
+	# $width is the size of the extracted $word.
+	# $word := int($hmac[$offset:$offset+$width])
+	$width = 4;
+	$offset = ord(substr($hmac, -1)) & 0x0F;
+	$word = unpack('N', substr($hmac, $offset, $width));
+
+	# We'll $mask out $word's most significant bit.
+	$bits = $width * 8;
+	$mask = ((1 << $bits) - 1) ^ (1 << ($bits - 1));
+
+	# $mod := 10 ** $digits.
+	$mod = 1;
+	$mod *= 10 for 1..$digits;
+
+	# And finally.
+	$totp = sprintf('%0*d', $digits, ($word & $mask) % $mod);
+	return_to_user($cmd, $totp);
+}
+
 # Main starts here.
 my (@opt_vaults, $opt_find);
 my ($opt_edit, $opt_view_all, $opt_overview, $opt_interactive);
-my ($opt_view, $opt_copy, $opt_oauth2);
+my ($opt_view, $opt_copy, $opt_oauth2, $opt_totp);
 my (@modes, $vault, $ini);
 
 $\ = "\n";
@@ -1008,6 +1090,7 @@ exit(1) unless GetOptions(
 	'v|view=s'	=> \$opt_view,
 	'c|copy=s'	=> \$opt_copy,
 	'A|oauth2'	=> \$opt_oauth2,
+	'T|totp'	=> \$opt_totp,
 	'n|newline!'	=> \$Opt_newline,
 	'd|detach!'	=> \$Opt_detach,
 	'D|detach-without-timeout' => sub {
@@ -1057,12 +1140,20 @@ if (@ARGV)
 	usage();
 }
 
-if ($opt_oauth2)
+if ($opt_oauth2 && $opt_totp)
+{
+	die "--auth2 and --totp are mutually exclusive.";
+} elsif ($opt_oauth2)
 {
 	init_oauth2();
 	defined $opt_view || defined $opt_copy
 		or die "--oauth2 only makes sense with the view or copy ",
-			"command";
+			"command.";
+} elsif ($opt_totp)
+{
+	defined $opt_view || defined $opt_copy
+		or die "--totp only makes sense with the view or copy ",
+			"command.";
 }
 
 if ($opt_find)
@@ -1110,7 +1201,8 @@ if ($opt_overview)
 			gen-and-copy-oauth2-refresh-token
 			gen-and-copy-oauth2-refresh-token-oob
 			gen-oauth2-access-token
-			gen-and-copy-oauth2-access-token);
+			gen-and-copy-oauth2-access-token
+			totp totp-view);
 		$term->Attribs->{'completion_function'} = sub
 		{
 			my ($text, $line, $start) = @_;
@@ -1225,6 +1317,16 @@ if ($opt_overview)
 					' ' x 8, "[<section>]";
 				print "    Acquire a new access token and ",
 					"copy it to the clipboard.";
+				print "";
+				print "totp [<section>/][<key>]";
+				print "    Generate a time-based one-time ",
+					"password and copy it to the ",
+					"clipboard.";
+				print "    The parameter specifies where ",
+					"to find the algorithm parameters ",
+					"in the vault.";
+				print "totp-view [<section>/][<key>]";
+				print "    Generate and print a TOTP.",
 				# >>>
 			} elsif ($what eq "clear")
 			{
@@ -1300,6 +1402,11 @@ if ($opt_overview)
 				oauth2_refresh_access_token($ini,
 					$what ? unescape($what) : "default",
 					defined $1 ? "copy" : "view");
+			} elsif ($what =~ s/^totp(-view)?(?:\s+|$)//)
+			{
+				gen_totp($ini,
+					unescape($what),
+					defined $1 ? "view" : "copy");
 			} elsif ($what =~ s/^view(?:\s+|$)//)
 			{
 				view_cmd($ini, unescape($what));
@@ -1336,6 +1443,11 @@ if ($opt_overview)
 	{
 		die "$key: should be either \"refresh\" or \"access\"";
 	}
+} elsif ($opt_totp)
+{
+	defined $opt_view
+		? gen_totp($ini, $opt_view, "view")
+		: gen_totp($ini, $opt_copy, "copy")
 } elsif (defined $opt_view)
 {
 	view_cmd($ini, $opt_view);
