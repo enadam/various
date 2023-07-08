@@ -493,7 +493,6 @@ sub _need_more
 package main;
 use strict;
 use Getopt::Long;
-use Scalar::Util;
 use File::Temp;
 use User::pwent;
 use User::grent;
@@ -1238,7 +1237,7 @@ sub send_dir
 	} sort({
 		my $lhs = $$a{$Opt_dirlist_order};
 		my $rhs = $$b{$Opt_dirlist_order};
-		Scalar::Util::looks_like_number($lhs)
+		$Opt_dirlist_order eq "age"
 			? $lhs <=> $rhs
 			: $lhs cmp $rhs;
 	} @list)));
